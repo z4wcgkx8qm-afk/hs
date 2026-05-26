@@ -4,6 +4,7 @@ import asyncpg
 import logging
 import numpy as np
 import cv2
+import requests
 from io import BytesIO
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -26,15 +27,61 @@ dp = Dispatcher()
 db_pool = None
 current_token = {}
 
-# === QR-декодер ===
+# === QR-декодер (5 попыток OpenCV + запасной API) ===
 def read_qr(image: Image.Image) -> str | None:
-    """Декодирует QR-код с изображения через OpenCV"""
+    """Максимально надёжное распознавание QR"""
     try:
         img = np.array(image.convert('RGB'))
         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         detector = cv2.QRCodeDetector()
+        
+        # Попытка 1: оригинал
         data, bbox, _ = detector.detectAndDecode(img)
-        return data if data else None
+        if data: return data
+        
+        # Попытка 2: контраст
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        _, enhanced = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        data, bbox, _ = detector.detectAndDecode(enhanced)
+        if data: return data
+        
+        # Попытка 3: x2 размер
+        h, w = img.shape[:2]
+        scaled = cv2.resize(img, (w * 2, h * 2), interpolation=cv2.INTER_CUBIC)
+        data, bbox, _ = detector.detectAndDecode(scaled)
+        if data: return data
+        
+        # Попытка 4: x3 размер
+        scaled3 = cv2.resize(img, (w * 3, h * 3), interpolation=cv2.INTER_CUBIC)
+        data, bbox, _ = detector.detectAndDecode(scaled3)
+        if data: return data
+        
+        # Попытка 5: резкость + бинаризация
+        blurred = cv2.GaussianBlur(gray, (0, 0), 3)
+        sharpened = cv2.addWeighted(gray, 1.5, blurred, -0.5, 0)
+        _, binary = cv2.threshold(sharpened, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        data, bbox, _ = detector.detectAndDecode(binary)
+        if data: return data
+        
+        # Запасной вариант: внешний API
+        try:
+            buf = BytesIO()
+            image.save(buf, format='PNG')
+            buf.seek(0)
+            files = {'file': ('qr.png', buf, 'image/png')}
+            response = requests.post(
+                'https://api.qrserver.com/v1/read-qr-code/',
+                files=files,
+                timeout=10
+            )
+            if response.status_code == 200:
+                result = response.json()
+                if result and result[0]['symbol'][0]['data']:
+                    return result[0]['symbol'][0]['data']
+        except Exception:
+            pass
+        
+        return None
     except Exception:
         return None
 
