@@ -1,7 +1,7 @@
 aiogram>=3.0
-pymax>=2.1.0
 asyncpg
 pillow
 opencv-python-headless
 numpy
 python-dotenv
+git+https://github.com/MaxApiTeam/PyMax.git@v2.1.0
