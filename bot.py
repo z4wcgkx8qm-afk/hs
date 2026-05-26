@@ -1,3 +1,4 @@
+
 import asyncio
 import os
 import asyncpg
@@ -11,7 +12,7 @@ from zoneinfo import ZoneInfo
 from PIL import Image
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pymax import WebClient, ExtraConfig
 
 # === Логирование ===
@@ -21,59 +22,50 @@ logger = logging.getLogger(__name__)
 # === Конфигурация ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
+ADMIN_ID = 8540562276
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 db_pool = None
 current_token = {}
+expecting_tokens = set()
 
-# === QR-декодер (5 попыток OpenCV + запасной API) ===
+# === QR-декодер ===
 def read_qr(image: Image.Image) -> str | None:
-    """Максимально надёжное распознавание QR"""
     try:
         img = np.array(image.convert('RGB'))
         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         detector = cv2.QRCodeDetector()
         
-        # Попытка 1: оригинал
         data, bbox, _ = detector.detectAndDecode(img)
         if data: return data
         
-        # Попытка 2: контраст
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         _, enhanced = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         data, bbox, _ = detector.detectAndDecode(enhanced)
         if data: return data
         
-        # Попытка 3: x2 размер
         h, w = img.shape[:2]
         scaled = cv2.resize(img, (w * 2, h * 2), interpolation=cv2.INTER_CUBIC)
         data, bbox, _ = detector.detectAndDecode(scaled)
         if data: return data
         
-        # Попытка 4: x3 размер
         scaled3 = cv2.resize(img, (w * 3, h * 3), interpolation=cv2.INTER_CUBIC)
         data, bbox, _ = detector.detectAndDecode(scaled3)
         if data: return data
         
-        # Попытка 5: резкость + бинаризация
         blurred = cv2.GaussianBlur(gray, (0, 0), 3)
         sharpened = cv2.addWeighted(gray, 1.5, blurred, -0.5, 0)
         _, binary = cv2.threshold(sharpened, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         data, bbox, _ = detector.detectAndDecode(binary)
         if data: return data
         
-        # Запасной вариант: внешний API
         try:
             buf = BytesIO()
             image.save(buf, format='PNG')
             buf.seek(0)
             files = {'file': ('qr.png', buf, 'image/png')}
-            response = requests.post(
-                'https://api.qrserver.com/v1/read-qr-code/',
-                files=files,
-                timeout=10
-            )
+            response = requests.post('https://api.qrserver.com/v1/read-qr-code/', files=files, timeout=10)
             if response.status_code == 200:
                 result = response.json()
                 if result and result[0]['symbol'][0]['data']:
@@ -91,6 +83,11 @@ async def init_db():
     db_pool = await asyncpg.create_pool(DATABASE_URL)
     async with db_pool.acquire() as conn:
         await conn.execute("""
+            CREATE TABLE IF NOT EXISTS approved_groups (
+                group_id BIGINT PRIMARY KEY
+            )
+        """)
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS tokens (
                 phone TEXT PRIMARY KEY,
                 token TEXT NOT NULL,
@@ -100,11 +97,22 @@ async def init_db():
         """)
     logger.info("База данных инициализирована")
 
+async def is_group_approved(group_id: int) -> bool:
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT 1 FROM approved_groups WHERE group_id = $1", group_id)
+        return row is not None
+
+async def add_approved_group(group_id: int):
+    async with db_pool.acquire() as conn:
+        await conn.execute("INSERT INTO approved_groups (group_id) VALUES ($1) ON CONFLICT DO NOTHING", group_id)
+
+async def remove_approved_group(group_id: int):
+    async with db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM approved_groups WHERE group_id = $1", group_id)
+
 async def get_random_token():
     async with db_pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT phone, token FROM tokens WHERE alive = TRUE ORDER BY RANDOM() LIMIT 1"
-        )
+        row = await conn.fetchrow("SELECT phone, token FROM tokens WHERE alive = TRUE ORDER BY RANDOM() LIMIT 1")
         return {"phone": row["phone"], "token": row["token"]} if row else None
 
 async def save_token(phone: str, token: str):
@@ -115,44 +123,65 @@ async def save_token(phone: str, token: str):
             phone, token
         )
 
-async def add_token_manual(phone: str, token: str):
+async def delete_dead_tokens():
     async with db_pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO tokens (phone, token) VALUES ($1, $2) "
-            "ON CONFLICT (phone) DO UPDATE SET token = $2, alive = TRUE, created_at = NOW()",
-            phone, token
-        )
+        result = await conn.execute("DELETE FROM tokens WHERE alive = FALSE")
+        return int(result.split()[-1]) if result else 0
+
+# === Проверка доступа ===
+async def check_access(msg: Message) -> bool:
+    if msg.chat.type == "private":
+        return msg.from_user.id == ADMIN_ID
+    if msg.chat.type in ("group", "supergroup"):
+        return await is_group_approved(msg.chat.id)
+    return False
 
 # === Команда /start ===
 @dp.message(Command("start"))
 async def start_cmd(msg: Message):
-    await msg.answer(
-        "👋 Бот для QR-авторизации MAX\n\n"
-        "/get — получить номер для авторизации\n"
-        "/add +79161234567 TOKEN — добавить токен вручную\n\n"
-        "После /get отправьте скриншот QR-кода с web.max.ru"
-    )
+    if msg.chat.type == "private" and msg.from_user.id == ADMIN_ID:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Загрузить аккаунты", callback_data="load_accounts")],
+            [InlineKeyboardButton(text="Очистить мёртвые сессии", callback_data="clear_dead_admin")]
+        ])
+        await msg.answer("🔐 Админ-панель maxPLUS\n\nДобро пожаловать в панель управления ботом.", reply_markup=keyboard)
+    elif msg.chat.type == "private":
+        return
+    else:
+        return
 
-# === Команда /add ===
-@dp.message(Command("add"))
-async def add_cmd(msg: Message):
-    parts = msg.text.split()
-    if len(parts) != 3:
-        return await msg.answer("❌ Используйте: /add +79161234567 ТОКЕН")
-    
-    phone = parts[1]
-    token = parts[2]
-    
-    if not phone.startswith("+") or len(phone) != 12:
-        return await msg.answer("❌ Неверный формат номера. Пример: +79161234567")
-    
-    await add_token_manual(phone, token)
-    logger.info(f"Токен добавлен вручную: {phone}")
-    await msg.answer(f"✅ Токен для {phone} добавлен")
+# === Команда /setup ===
+@dp.message(Command("setup"))
+async def setup_cmd(msg: Message):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    try:
+        group_id = int(msg.text.split()[1])
+        await add_approved_group(group_id)
+        await msg.answer(f"✅ Группа {group_id} одобрена")
+        logger.info(f"Группа {group_id} одобрена админом")
+    except (IndexError, ValueError):
+        await msg.answer("❌ Используйте: /setup ID_группы")
+
+# === Команда /unsetup ===
+@dp.message(Command("unsetup"))
+async def unsetup_cmd(msg: Message):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    try:
+        group_id = int(msg.text.split()[1])
+        await remove_approved_group(group_id)
+        await msg.answer(f"✅ Группа {group_id} удалена из одобренных")
+        logger.info(f"Группа {group_id} удалена админом")
+    except (IndexError, ValueError):
+        await msg.answer("❌ Используйте: /unsetup ID_группы")
 
 # === Команда /get ===
 @dp.message(Command("get"))
 async def get_cmd(msg: Message):
+    if not await check_access(msg):
+        return
+
     token_data = await get_random_token()
     if not token_data:
         return await msg.answer("❌ Нет доступных токенов для авторизации")
@@ -167,9 +196,71 @@ async def get_cmd(msg: Message):
         f"📩 Отправьте QR-код для авторизации этого номера"
     )
 
+# === Команда /cancel ===
+@dp.message(Command("cancel"))
+async def cancel_cmd(msg: Message):
+    expecting_tokens.discard(msg.from_user.id)
+    if msg.from_user.id == ADMIN_ID:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Загрузить аккаунты", callback_data="load_accounts")],
+            [InlineKeyboardButton(text="Очистить мёртвые сессии", callback_data="clear_dead_admin")]
+        ])
+        await msg.answer("🔐 Админ-панель maxPLUS\n\nДобро пожаловать в панель управления ботом.", reply_markup=keyboard)
+
+# === Callback: Загрузить аккаунты ===
+@dp.callback_query(lambda c: c.data == "load_accounts")
+async def load_accounts_callback(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return await callback.answer("Доступ запрещён", show_alert=True)
+    
+    expecting_tokens.add(callback.from_user.id)
+    await callback.message.answer(
+        "📥 Отправьте токены для загрузки.\n"
+        "Формат: +79161234567 ТОКЕН\n"
+        "Каждая пара с новой строки\n"
+        "/cancel — отмена"
+    )
+    await callback.answer()
+
+# === Callback: Очистить мёртвые ===
+@dp.callback_query(lambda c: c.data == "clear_dead_admin")
+async def clear_dead_admin_callback(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return await callback.answer("Доступ запрещён", show_alert=True)
+    
+    count = await delete_dead_tokens()
+    await callback.message.answer(f"✅ Удалено {count} мёртвых сессий")
+    await callback.answer()
+
+# === Приём токенов от админа ===
+@dp.message()
+async def text_handler(msg: Message):
+    if msg.text and msg.text.startswith("/"):
+        return
+
+    # Загрузка токенов админом
+    if msg.from_user.id in expecting_tokens and msg.from_user.id == ADMIN_ID:
+        lines = msg.text.strip().split("\n")
+        loaded = 0
+        for line in lines:
+            parts = line.strip().split()
+            if len(parts) == 2 and parts[0].startswith("+") and len(parts[0]) == 12:
+                phone = parts[0]
+                token = parts[1]
+                await save_token(phone, token)
+                loaded += 1
+        
+        expecting_tokens.discard(msg.from_user.id)
+        await msg.answer(f"✅ Загружено {loaded} токенов")
+        logger.info(f"Админ загрузил {loaded} токенов")
+        return
+
 # === Приём фото с QR ===
 @dp.message(F.photo)
 async def qr_handler(msg: Message):
+    if not await check_access(msg):
+        return
+
     if msg.from_user.id not in current_token:
         return await msg.answer("❌ Сначала запросите номер командой /get")
 
