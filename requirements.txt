@@ -1,6 +1,6 @@
 aiogram>=3.0
-pymax
+pymax>=2.1.0
 asyncpg
 pillow
-pyzbar
+opencv-python-headless
 python-dotenv
