@@ -3,4 +3,5 @@ pymax>=2.1.0
 asyncpg
 pillow
 opencv-python-headless
+numpy
 python-dotenv
