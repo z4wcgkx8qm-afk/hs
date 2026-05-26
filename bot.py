@@ -2,11 +2,12 @@ import asyncio
 import os
 import asyncpg
 import logging
+import numpy as np
+import cv2
 from io import BytesIO
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from PIL import Image
-from pyzbar.pyzbar import decode
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message
@@ -23,7 +24,19 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 db_pool = None
-current_token = {}  # user_id -> {"phone": str, "token": str}
+current_token = {}
+
+# === QR-декодер ===
+def read_qr(image: Image.Image) -> str | None:
+    """Декодирует QR-код с изображения через OpenCV"""
+    try:
+        img = np.array(image.convert('RGB'))
+        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        detector = cv2.QRCodeDetector()
+        data, bbox, _ = detector.detectAndDecode(img)
+        return data if data else None
+    except Exception:
+        return None
 
 # === База данных ===
 async def init_db():
@@ -56,7 +69,6 @@ async def save_token(phone: str, token: str):
         )
 
 async def add_token_manual(phone: str, token: str):
-    """Добавление токена вручную (DESKTOP или WEB)"""
     async with db_pool.acquire() as conn:
         await conn.execute(
             "INSERT INTO tokens (phone, token) VALUES ($1, $2) "
@@ -114,25 +126,21 @@ async def qr_handler(msg: Message):
     if msg.from_user.id not in current_token:
         return await msg.answer("❌ Сначала запросите номер командой /get")
 
-    # Скачиваем фото
     photo = msg.photo[-1]
     buf = BytesIO()
     await bot.download(photo, destination=buf)
     buf.seek(0)
 
-    # Расшифровываем QR
     try:
         img = Image.open(buf)
-        decoded = decode(img)
-        if not decoded:
+        qr_data = read_qr(img)
+        if not qr_data:
             return await msg.answer("❌ Не удалось распознать QR-код на изображении")
-        qr_data = decoded[0].data.decode("utf-8")
         if "max.ru" not in qr_data and "oneme.ru" not in qr_data:
             return await msg.answer("❌ QR-код не содержит ссылку MAX")
     except Exception:
         return await msg.answer("❌ Не удалось распознать QR-код на изображении")
 
-    # Авторизуем
     token_data = current_token.pop(msg.from_user.id)
     phone = token_data["phone"]
     token = token_data["token"]
