@@ -110,12 +110,6 @@ async def init_db():
     db_pool = await asyncpg.create_pool(DATABASE_URL)
     async with db_pool.acquire() as conn:
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS approved_groups (
-                group_id BIGINT PRIMARY KEY
-            )
-        """)
-
-        await conn.execute("""
             CREATE TABLE IF NOT EXISTS tokens (
                 id SERIAL PRIMARY KEY,
                 phone TEXT,
@@ -125,7 +119,6 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT NOW()
             )
         """)
-
     logger.info("База данных инициализирована")
 
 # === ВРЕМЕННАЯ КОМАНДА ДЛЯ ОЧИСТКИ БАЗЫ ===
@@ -138,19 +131,6 @@ async def cleardb_cmd(msg: Message):
     await init_db()
     await msg.answer("✅ База очищена")
 # === УДАЛИТЬ ПОСЛЕ ИСПОЛЬЗОВАНИЯ ===
-
-async def is_group_approved(group_id: int) -> bool:
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT 1 FROM approved_groups WHERE group_id = $1", group_id)
-        return row is not None
-
-async def add_approved_group(group_id: int):
-    async with db_pool.acquire() as conn:
-        await conn.execute("INSERT INTO approved_groups (group_id) VALUES ($1) ON CONFLICT DO NOTHING", group_id)
-
-async def remove_approved_group(group_id: int):
-    async with db_pool.acquire() as conn:
-        await conn.execute("DELETE FROM approved_groups WHERE group_id = $1", group_id)
 
 async def get_random_alive_token():
     async with db_pool.acquire() as conn:
@@ -194,48 +174,44 @@ async def delete_dead_tokens():
 @dp.message(Command("start"))
 async def start_cmd(msg: Message):
     if msg.chat.type == "private" and msg.from_user.id == ADMIN_ID:
+        total = 0
+        alive = 0
+        async with db_pool.acquire() as conn:
+            total = await conn.fetchval("SELECT COUNT(*) FROM tokens")
+            alive = await conn.fetchval("SELECT COUNT(*) FROM tokens WHERE alive = TRUE")
+
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="Загрузить токены", callback_data="load_tokens")],
             [InlineKeyboardButton(text="Очистить мёртвые сессии", callback_data="clear_dead_admin")]
         ])
-        await msg.answer("🔐 Админ-панель maxPLUS\n\nДобро пожаловать в панель управления ботом.", reply_markup=keyboard)
-
-# === Команда /setup ===
-@dp.message(Command("setup"))
-async def setup_cmd(msg: Message):
-    if msg.from_user.id != ADMIN_ID:
-        return
-    try:
-        group_id = int(msg.text.split()[1])
-        await add_approved_group(group_id)
-        await msg.answer(f"✅ Группа {group_id} одобрена")
-        logger.info(f"Группа {group_id} одобрена админом")
-    except (IndexError, ValueError):
-        await msg.answer("❌ Используйте: /setup ID_группы")
-
-# === Команда /unsetup ===
-@dp.message(Command("unsetup"))
-async def unsetup_cmd(msg: Message):
-    if msg.from_user.id != ADMIN_ID:
-        return
-    try:
-        group_id = int(msg.text.split()[1])
-        await remove_approved_group(group_id)
-        await msg.answer(f"✅ Группа {group_id} удалена из одобренных")
-        logger.info(f"Группа {group_id} удалена админом")
-    except (IndexError, ValueError):
-        await msg.answer("❌ Используйте: /unsetup ID_группы")
+        await msg.answer(
+            f"🔐 Админ-панель maxPLUS\n\n"
+            f"📊 Токенов в базе: {total} (живых: {alive})\n\n"
+            f"Добро пожаловать в панель управления ботом.",
+            reply_markup=keyboard
+        )
 
 # === Команда /cancel ===
 @dp.message(Command("cancel"))
 async def cancel_cmd(msg: Message):
     expecting_tokens.discard(msg.from_user.id)
     if msg.from_user.id == ADMIN_ID and msg.chat.type == "private":
+        total = 0
+        alive = 0
+        async with db_pool.acquire() as conn:
+            total = await conn.fetchval("SELECT COUNT(*) FROM tokens")
+            alive = await conn.fetchval("SELECT COUNT(*) FROM tokens WHERE alive = TRUE")
+
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="Загрузить токены", callback_data="load_tokens")],
             [InlineKeyboardButton(text="Очистить мёртвые сессии", callback_data="clear_dead_admin")]
         ])
-        await msg.answer("🔐 Админ-панель maxPLUS\n\nДобро пожаловать в панель управления ботом.", reply_markup=keyboard)
+        await msg.answer(
+            f"🔐 Админ-панель maxPLUS\n\n"
+            f"📊 Токенов в базе: {total} (живых: {alive})\n\n"
+            f"Добро пожаловать в панель управления ботом.",
+            reply_markup=keyboard
+        )
 
 # === Callback: Загрузить токены ===
 @dp.callback_query(lambda c: c.data == "load_tokens")
@@ -267,41 +243,34 @@ async def clear_dead_admin_callback(callback: CallbackQuery):
     else:
         await callback.answer(f"Очищено {count} мёртвых сессий", show_alert=True)
 
-# === Приём токенов от админа ===
+# === Единый обработчик сообщений ===
 @dp.message()
-async def text_handler(msg: Message):
-    if not msg.text or msg.text.startswith("/"):
+async def unified_handler(msg: Message):
+    # Пропускаем команды
+    if msg.text and msg.text.startswith("/"):
         return
 
-    if msg.from_user.id != ADMIN_ID or msg.chat.type != "private":
+    # Админ в личке: загрузка токенов
+    if msg.chat.type == "private" and msg.from_user.id == ADMIN_ID and msg.from_user.id in expecting_tokens:
+        if msg.text:
+            lines = msg.text.strip().split("\n")
+            loaded = 0
+            for line in lines:
+                token = extract_token(line.strip())
+                if token:
+                    await save_token_to_db(token)
+                    loaded += 1
+            expecting_tokens.discard(msg.from_user.id)
+            await msg.answer(f"✅ Загружено {loaded} токенов")
+            logger.info(f"Админ загрузил {loaded} токенов")
         return
 
-    if msg.from_user.id not in expecting_tokens:
+    # Группа: фото с QR
+    if msg.chat.type in ("group", "supergroup") and msg.photo:
+        if msg.message_id not in processing_tokens:
+            processing_tokens.add(msg.message_id)
+            asyncio.create_task(process_qr(msg))
         return
-
-    lines = msg.text.strip().split("\n")
-    loaded = 0
-    for line in lines:
-        token = extract_token(line.strip())
-        if token:
-            await save_token_to_db(token)
-            loaded += 1
-
-    expecting_tokens.discard(msg.from_user.id)
-    await msg.answer(f"✅ Загружено {loaded} токенов")
-    logger.info(f"Админ загрузил {loaded} токенов")
-
-# === Приём фото с QR ===
-@dp.message(F.photo)
-async def qr_handler(msg: Message):
-    if msg.chat.type not in ("group", "supergroup") or not await is_group_approved(msg.chat.id):
-        return
-
-    if msg.message_id in processing_tokens:
-        return
-
-    processing_tokens.add(msg.message_id)
-    asyncio.create_task(process_qr(msg))
 
 async def process_qr(msg: Message):
     try:
