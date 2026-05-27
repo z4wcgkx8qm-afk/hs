@@ -115,41 +115,29 @@ async def init_db():
             )
         """)
 
-        table_exists = await conn.fetchval(
-            "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'tokens')"
-        )
-
-        if not table_exists:
-            await conn.execute("""
-                CREATE TABLE tokens (
-                    id SERIAL PRIMARY KEY,
-                    phone TEXT,
-                    token TEXT,
-                    web_token TEXT UNIQUE,
-                    alive BOOLEAN DEFAULT TRUE,
-                    created_at TIMESTAMP DEFAULT NOW()
-                )
-            """)
-        else:
-            columns = await conn.fetch(
-                "SELECT column_name FROM information_schema.columns WHERE table_name = 'tokens'"
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS tokens (
+                id SERIAL PRIMARY KEY,
+                phone TEXT,
+                token TEXT,
+                web_token TEXT UNIQUE,
+                alive BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT NOW()
             )
-            column_names = {c["column_name"] for c in columns}
-
-            if "web_token" not in column_names:
-                await conn.execute("ALTER TABLE tokens ADD COLUMN web_token TEXT")
-            if "id" not in column_names:
-                await conn.execute("ALTER TABLE tokens ADD COLUMN id SERIAL")
-            if "alive" not in column_names:
-                await conn.execute("ALTER TABLE tokens ADD COLUMN alive BOOLEAN DEFAULT TRUE")
-            if "created_at" not in column_names:
-                await conn.execute("ALTER TABLE tokens ADD COLUMN created_at TIMESTAMP DEFAULT NOW()")
-            if "phone" not in column_names:
-                await conn.execute("ALTER TABLE tokens ADD COLUMN phone TEXT")
-            if "token" not in column_names:
-                await conn.execute("ALTER TABLE tokens ADD COLUMN token TEXT")
+        """)
 
     logger.info("База данных инициализирована")
+
+# === ВРЕМЕННАЯ КОМАНДА ДЛЯ ОЧИСТКИ БАЗЫ ===
+@dp.message(Command("cleardb"))
+async def cleardb_cmd(msg: Message):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    async with db_pool.acquire() as conn:
+        await conn.execute("DROP TABLE IF EXISTS tokens CASCADE")
+    await init_db()
+    await msg.answer("✅ База очищена")
+# === УДАЛИТЬ ПОСЛЕ ИСПОЛЬЗОВАНИЯ ===
 
 async def is_group_approved(group_id: int) -> bool:
     async with db_pool.acquire() as conn:
