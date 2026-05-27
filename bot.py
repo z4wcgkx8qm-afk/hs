@@ -240,6 +240,15 @@ async def unset_cmd(msg: Message):
     except (IndexError, ValueError):
         await msg.answer("❌ Используйте: /unset ID_группы")
 
+# === Команда /nums ===
+@dp.message(Command("nums"))
+async def nums_cmd(msg: Message):
+    if msg.chat.type not in ("group", "supergroup") or not await is_group_approved(msg.chat.id):
+        return
+
+    total, alive = await get_token_counts()
+    await msg.answer(f"📊 Доступно токенов для сканирования: {alive}")
+
 # === Callback: Загрузить токены ===
 @dp.callback_query(lambda c: c.data == "load_tokens")
 async def load_tokens_callback(callback: CallbackQuery):
