@@ -121,17 +121,6 @@ async def init_db():
         """)
     logger.info("База данных инициализирована")
 
-# === ВРЕМЕННАЯ КОМАНДА ДЛЯ ОЧИСТКИ БАЗЫ ===
-@dp.message(Command("cleardb"))
-async def cleardb_cmd(msg: Message):
-    if msg.from_user.id != ADMIN_ID:
-        return
-    async with db_pool.acquire() as conn:
-        await conn.execute("DROP TABLE IF EXISTS tokens CASCADE")
-    await init_db()
-    await msg.answer("✅ База очищена")
-# === УДАЛИТЬ ПОСЛЕ ИСПОЛЬЗОВАНИЯ ===
-
 async def get_random_alive_token():
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -170,48 +159,39 @@ async def delete_dead_tokens():
         result = await conn.execute("DELETE FROM tokens WHERE alive = FALSE")
         return int(result.split()[-1]) if result else 0
 
+async def get_token_counts():
+    async with db_pool.acquire() as conn:
+        total = await conn.fetchval("SELECT COUNT(*) FROM tokens")
+        alive = await conn.fetchval("SELECT COUNT(*) FROM tokens WHERE alive = TRUE")
+        return total, alive
+
+def admin_panel_text(total, alive):
+    return (
+        f"🔐 Админ-панель maxPLUS\n\n"
+        f"📊 Токенов в базе: {total} (доступно: {alive})\n\n"
+        f"Добро пожаловать в панель управления ботом."
+    )
+
+def admin_panel_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Загрузить токены", callback_data="load_tokens")],
+        [InlineKeyboardButton(text="Очистить мёртвые сессии", callback_data="clear_dead_admin")]
+    ])
+
 # === Команда /start ===
 @dp.message(Command("start"))
 async def start_cmd(msg: Message):
     if msg.chat.type == "private" and msg.from_user.id == ADMIN_ID:
-        total = 0
-        alive = 0
-        async with db_pool.acquire() as conn:
-            total = await conn.fetchval("SELECT COUNT(*) FROM tokens")
-            alive = await conn.fetchval("SELECT COUNT(*) FROM tokens WHERE alive = TRUE")
-
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Загрузить токены", callback_data="load_tokens")],
-            [InlineKeyboardButton(text="Очистить мёртвые сессии", callback_data="clear_dead_admin")]
-        ])
-        await msg.answer(
-            f"🔐 Админ-панель maxPLUS\n\n"
-            f"📊 Токенов в базе: {total} (живых: {alive})\n\n"
-            f"Добро пожаловать в панель управления ботом.",
-            reply_markup=keyboard
-        )
+        total, alive = await get_token_counts()
+        await msg.answer(admin_panel_text(total, alive), reply_markup=admin_panel_keyboard())
 
 # === Команда /cancel ===
 @dp.message(Command("cancel"))
 async def cancel_cmd(msg: Message):
     expecting_tokens.discard(msg.from_user.id)
     if msg.from_user.id == ADMIN_ID and msg.chat.type == "private":
-        total = 0
-        alive = 0
-        async with db_pool.acquire() as conn:
-            total = await conn.fetchval("SELECT COUNT(*) FROM tokens")
-            alive = await conn.fetchval("SELECT COUNT(*) FROM tokens WHERE alive = TRUE")
-
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Загрузить токены", callback_data="load_tokens")],
-            [InlineKeyboardButton(text="Очистить мёртвые сессии", callback_data="clear_dead_admin")]
-        ])
-        await msg.answer(
-            f"🔐 Админ-панель maxPLUS\n\n"
-            f"📊 Токенов в базе: {total} (живых: {alive})\n\n"
-            f"Добро пожаловать в панель управления ботом.",
-            reply_markup=keyboard
-        )
+        total, alive = await get_token_counts()
+        await msg.answer(admin_panel_text(total, alive), reply_markup=admin_panel_keyboard())
 
 # === Callback: Загрузить токены ===
 @dp.callback_query(lambda c: c.data == "load_tokens")
@@ -220,15 +200,7 @@ async def load_tokens_callback(callback: CallbackQuery):
         return await callback.answer("Доступ запрещён", show_alert=True)
 
     expecting_tokens.add(callback.from_user.id)
-    await callback.message.answer(
-        "📥 Отправьте токены для загрузки.\n"
-        "Можно кидать в любом формате:\n"
-        "- Только токен\n"
-        "- JSON из localStorage\n"
-        "- Файл с метаданными\n\n"
-        "Каждый токен с новой строки\n"
-        "/cancel — отмена"
-    )
+    await callback.message.answer("📥 Отправьте токены. Каждый с новой строки.\n/cancel — отмена")
     await callback.answer()
 
 # === Callback: Очистить мёртвые ===
@@ -243,6 +215,12 @@ async def clear_dead_admin_callback(callback: CallbackQuery):
     else:
         await callback.answer(f"Очищено {count} мёртвых сессий", show_alert=True)
 
+    total, alive = await get_token_counts()
+    await callback.message.edit_text(
+        admin_panel_text(total, alive),
+        reply_markup=admin_panel_keyboard()
+    )
+
 # === Единый обработчик сообщений ===
 @dp.message()
 async def unified_handler(msg: Message):
@@ -251,13 +229,23 @@ async def unified_handler(msg: Message):
 
     if msg.chat.type == "private" and msg.from_user.id == ADMIN_ID and msg.from_user.id in expecting_tokens:
         if msg.text:
-            lines = msg.text.strip().split("\n")
-            loaded = 0
+            lines = [line.strip() for line in msg.text.strip().split("\n") if line.strip()]
+            tokens = []
+
             for line in lines:
-                token = extract_token(line.strip())
+                token = extract_token(line)
                 if token:
-                    await save_token_to_db(token)
-                    loaded += 1
+                    tokens.append(token)
+
+            if not tokens:
+                await msg.answer("❌ Неверный формат. Отправьте токены в правильном формате.")
+                return
+
+            loaded = 0
+            for token in tokens:
+                await save_token_to_db(token)
+                loaded += 1
+
             expecting_tokens.discard(msg.from_user.id)
             await msg.answer(f"✅ Загружено {loaded} токенов")
             logger.info(f"Админ загрузил {loaded} токенов")
