@@ -246,11 +246,9 @@ async def clear_dead_admin_callback(callback: CallbackQuery):
 # === Единый обработчик сообщений ===
 @dp.message()
 async def unified_handler(msg: Message):
-    # Пропускаем команды
     if msg.text and msg.text.startswith("/"):
         return
 
-    # Админ в личке: загрузка токенов
     if msg.chat.type == "private" and msg.from_user.id == ADMIN_ID and msg.from_user.id in expecting_tokens:
         if msg.text:
             lines = msg.text.strip().split("\n")
@@ -265,7 +263,6 @@ async def unified_handler(msg: Message):
             logger.info(f"Админ загрузил {loaded} токенов")
         return
 
-    # Группа: фото с QR
     if msg.chat.type in ("group", "supergroup") and msg.photo:
         if msg.message_id not in processing_tokens:
             processing_tokens.add(msg.message_id)
@@ -274,11 +271,6 @@ async def unified_handler(msg: Message):
 
 async def process_qr(msg: Message):
     try:
-        token_data = await get_random_alive_token()
-        if not token_data:
-            await msg.reply("❌ Нет доступных токенов")
-            return
-
         photo = msg.photo[-1]
         buf = BytesIO()
         await bot.download(photo, destination=buf)
@@ -299,55 +291,73 @@ async def process_qr(msg: Message):
             await msg.reply("❌ QR-код не содержит ссылку MAX")
             return
 
-        token_id = token_data["id"]
-        token = token_data["token"]
-        token_type = token_data["type"]
-        phone = token_data["phone"]
+        tried = 0
+        while True:
+            token_data = await get_random_alive_token()
+            if not token_data:
+                await msg.reply("❌ Нет доступных токенов")
+                return
 
-        user_agent = get_random_user_agent()
+            tried += 1
+            token_id = token_data["id"]
+            token = token_data["token"]
+            token_type = token_data["type"]
+            phone = token_data["phone"]
 
-        if token_type == "DESKTOP":
-            web_client = WebClient(
-                work_dir="cache",
-                session_name=f"qr_{token_id}.db",
-                extra_config=ExtraConfig(token=token, user_agent=user_agent),
-            )
-            await web_client.start()
-            new_web_token = web_client.token
-            if new_web_token:
-                token = new_web_token
-        else:
-            web_client = WebClient(
-                work_dir="cache",
-                session_name=f"qr_{token_id}.db",
-                extra_config=ExtraConfig(user_agent=user_agent),
-            )
+            try:
+                user_agent = get_random_user_agent()
 
-        await web_client.authorize_qr_login(qr_data)
+                if token_type == "DESKTOP":
+                    web_client = WebClient(
+                        work_dir="cache",
+                        session_name=f"qr_{token_id}.db",
+                        extra_config=ExtraConfig(token=token, user_agent=user_agent),
+                    )
+                    await web_client.start()
+                    new_web_token = web_client.token
+                    if new_web_token:
+                        token = new_web_token
+                else:
+                    web_client = WebClient(
+                        work_dir="cache",
+                        session_name=f"qr_{token_id}.db",
+                        extra_config=ExtraConfig(user_agent=user_agent),
+                    )
 
-        if not phone and web_client.me and web_client.me.contact:
-            phone = web_client.me.contact.phone
+                await web_client.authorize_qr_login(qr_data)
 
-        new_web_token = web_client.token
-        if new_web_token:
-            await save_web_token(token_id, phone, new_web_token)
+                if not phone and web_client.me and web_client.me.contact:
+                    phone = web_client.me.contact.phone
 
-        phone_display = phone or "неизвестен"
-        await msg.reply(f"✅ Номер {phone_display} успешно авторизован")
-        logger.info(f"QR-авторизация успешна: токен #{token_id}, номер: {phone_display}")
-    except Exception as e:
-        if token_data:
-            await mark_token_dead(token_data["id"])
-        error_text = str(e).lower()
-        if "expired" in error_text:
-            await msg.reply("❌ Время действия QR-кода истекло")
-        elif "blocked" in error_text:
-            await msg.reply("❌ Номер заблокирован или удалён")
-        elif "connect" in error_text or "network" in error_text or "timeout" in error_text:
-            await msg.reply("❌ Проблемы с сетью")
-        else:
-            await msg.reply("❌ Токен недействителен")
-        logger.warning(f"Ошибка QR-авторизации токен #{token_data['id'] if token_data else '?'}: {error_text}")
+                new_web_token = web_client.token
+                if new_web_token:
+                    await save_web_token(token_id, phone, new_web_token)
+
+                phone_display = phone or "неизвестен"
+                await msg.reply(f"✅ Номер {phone_display} успешно авторизован")
+                logger.info(f"QR-авторизация успешна: токен #{token_id}, номер: {phone_display}, попыток: {tried}")
+                return
+
+            except Exception as e:
+                error_text = str(e).lower()
+
+                if "expired" in error_text:
+                    await msg.reply("❌ Время действия QR-кода истекло")
+                    return
+
+                elif "blocked" in error_text or "recovery" in error_text:
+                    await mark_token_dead(token_id)
+                    logger.warning(f"Токен #{token_id} заблокирован, пробую следующий...")
+                    continue
+
+                elif "connect" in error_text or "network" in error_text or "timeout" in error_text:
+                    continue
+
+                else:
+                    await mark_token_dead(token_id)
+                    logger.warning(f"Токен #{token_id} недействителен, пробую следующий...")
+                    continue
+
     finally:
         processing_tokens.discard(msg.message_id)
 
