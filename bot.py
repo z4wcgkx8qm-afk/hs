@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # === Конфигурация ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
-ADMIN_IDS = {8540562276, 7742243877}
+ADMIN_IDS = {8540562276, 7742243877, 8706712229}
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
