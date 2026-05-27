@@ -29,7 +29,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 db_pool = None
 expecting_tokens = set()
-processing_tokens = set()  # защита от повторной обработки одного QR
+processing_tokens = set()
 
 # === Пул WEB user-agent'ов ===
 USER_AGENTS = [
@@ -114,6 +114,8 @@ async def init_db():
                 group_id BIGINT PRIMARY KEY
             )
         """)
+
+        # Создаём таблицу если её нет
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS tokens (
                 id SERIAL PRIMARY KEY,
@@ -124,6 +126,18 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT NOW()
             )
         """)
+
+        # Миграция для старой таблицы
+        columns = await conn.fetch("SELECT column_name FROM information_schema.columns WHERE table_name = 'tokens'")
+        column_names = [c["column_name"] for c in columns]
+
+        if "desktop_token" not in column_names:
+            await conn.execute("ALTER TABLE tokens ADD COLUMN desktop_token TEXT")
+        if "web_token" not in column_names:
+            await conn.execute("ALTER TABLE tokens ADD COLUMN web_token TEXT")
+        if "id" not in column_names:
+            await conn.execute("ALTER TABLE tokens ADD COLUMN id SERIAL PRIMARY KEY")
+
     logger.info("База данных инициализирована")
 
 async def is_group_approved(group_id: int) -> bool:
@@ -282,11 +296,9 @@ async def text_handler(msg: Message):
 # === Приём фото с QR ===
 @dp.message(F.photo)
 async def qr_handler(msg: Message):
-    # Только в одобренной группе
     if msg.chat.type not in ("group", "supergroup") or not await is_group_approved(msg.chat.id):
         return
 
-    # Защита от повторной обработки одного фото
     if msg.message_id in processing_tokens:
         return
 
@@ -294,7 +306,6 @@ async def qr_handler(msg: Message):
     asyncio.create_task(process_qr(msg))
 
 async def process_qr(msg: Message):
-    """Фоновая обработка одного QR"""
     try:
         token_data = await get_random_alive_token()
         if not token_data:
