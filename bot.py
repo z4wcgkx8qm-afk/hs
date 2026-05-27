@@ -115,7 +115,6 @@ async def init_db():
             )
         """)
 
-        # Проверяем существование таблицы
         table_exists = await conn.fetchval(
             "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'tokens')"
         )
@@ -125,16 +124,15 @@ async def init_db():
                 CREATE TABLE tokens (
                     id SERIAL PRIMARY KEY,
                     phone TEXT,
-                    token TEXT UNIQUE,
+                    token TEXT,
                     web_token TEXT UNIQUE,
                     alive BOOLEAN DEFAULT TRUE,
                     created_at TIMESTAMP DEFAULT NOW()
                 )
             """)
         else:
-            # Миграция: добавляем недостающие колонки
             columns = await conn.fetch(
-                "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'tokens'"
+                "SELECT column_name FROM information_schema.columns WHERE table_name = 'tokens'"
             )
             column_names = {c["column_name"] for c in columns}
 
@@ -148,6 +146,8 @@ async def init_db():
                 await conn.execute("ALTER TABLE tokens ADD COLUMN created_at TIMESTAMP DEFAULT NOW()")
             if "phone" not in column_names:
                 await conn.execute("ALTER TABLE tokens ADD COLUMN phone TEXT")
+            if "token" not in column_names:
+                await conn.execute("ALTER TABLE tokens ADD COLUMN token TEXT")
 
     logger.info("База данных инициализирована")
 
@@ -166,14 +166,12 @@ async def remove_approved_group(group_id: int):
 
 async def get_random_alive_token():
     async with db_pool.acquire() as conn:
-        # Сначала WEB
         row = await conn.fetchrow(
             "SELECT id, phone, web_token FROM tokens WHERE alive = TRUE AND web_token IS NOT NULL ORDER BY RANDOM() LIMIT 1"
         )
         if row:
             return {"id": row["id"], "phone": row["phone"], "token": row["web_token"], "type": "WEB"}
 
-        # Потом обычный токен
         row = await conn.fetchrow(
             "SELECT id, phone, token FROM tokens WHERE alive = TRUE AND token IS NOT NULL ORDER BY RANDOM() LIMIT 1"
         )
@@ -190,12 +188,10 @@ async def save_web_token(token_id: int, phone: str, web_token: str):
         )
 
 async def save_token_to_db(raw_token: str):
-    """Сохраняет токен (DESKTOP/WEB/ANDROID) в колонку token"""
     async with db_pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO tokens (token) VALUES ($1) ON CONFLICT (token) DO NOTHING",
-            raw_token
-        )
+        existing = await conn.fetchval("SELECT id FROM tokens WHERE token = $1", raw_token)
+        if not existing:
+            await conn.execute("INSERT INTO tokens (token) VALUES ($1)", raw_token)
 
 async def mark_token_dead(token_id: int):
     async with db_pool.acquire() as conn:
