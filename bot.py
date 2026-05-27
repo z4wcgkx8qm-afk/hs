@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # === Конфигурация ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
-ADMIN_ID = 8540562276
+ADMIN_IDS = {8540562276, 7742243877}
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -202,7 +202,7 @@ def admin_panel_keyboard():
 # === Команда /start ===
 @dp.message(Command("start"))
 async def start_cmd(msg: Message):
-    if msg.chat.type == "private" and msg.from_user.id == ADMIN_ID:
+    if msg.chat.type == "private" and msg.from_user.id in ADMIN_IDS:
         total, alive = await get_token_counts()
         await msg.answer(admin_panel_text(total, alive), reply_markup=admin_panel_keyboard())
 
@@ -210,40 +210,40 @@ async def start_cmd(msg: Message):
 @dp.message(Command("cancel"))
 async def cancel_cmd(msg: Message):
     expecting_tokens.discard(msg.from_user.id)
-    if msg.from_user.id == ADMIN_ID and msg.chat.type == "private":
+    if msg.from_user.id in ADMIN_IDS and msg.chat.type == "private":
         total, alive = await get_token_counts()
         await msg.answer(admin_panel_text(total, alive), reply_markup=admin_panel_keyboard())
 
 # === Команда /set ===
 @dp.message(Command("set"))
 async def set_cmd(msg: Message):
-    if msg.from_user.id != ADMIN_ID:
+    if msg.from_user.id not in ADMIN_IDS:
         return
     try:
         group_id = int(msg.text.split()[1])
         await add_approved_group(group_id)
         await msg.answer(f"✅ Группа {group_id} одобрена")
-        logger.info(f"Группа {group_id} одобрена админом")
+        logger.info(f"Группа {group_id} одобрена админом {msg.from_user.id}")
     except (IndexError, ValueError):
         await msg.answer("❌ Используйте: /set ID_группы")
 
 # === Команда /unset ===
 @dp.message(Command("unset"))
 async def unset_cmd(msg: Message):
-    if msg.from_user.id != ADMIN_ID:
+    if msg.from_user.id not in ADMIN_IDS:
         return
     try:
         group_id = int(msg.text.split()[1])
         await remove_approved_group(group_id)
         await msg.answer(f"✅ Группа {group_id} удалена из одобренных")
-        logger.info(f"Группа {group_id} удалена админом")
+        logger.info(f"Группа {group_id} удалена админом {msg.from_user.id}")
     except (IndexError, ValueError):
         await msg.answer("❌ Используйте: /unset ID_группы")
 
 # === Callback: Загрузить токены ===
 @dp.callback_query(lambda c: c.data == "load_tokens")
 async def load_tokens_callback(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
+    if callback.from_user.id not in ADMIN_IDS:
         return await callback.answer("Доступ запрещён", show_alert=True)
 
     expecting_tokens.add(callback.from_user.id)
@@ -253,7 +253,7 @@ async def load_tokens_callback(callback: CallbackQuery):
 # === Callback: Очистить мёртвые ===
 @dp.callback_query(lambda c: c.data == "clear_dead_admin")
 async def clear_dead_admin_callback(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
+    if callback.from_user.id not in ADMIN_IDS:
         return await callback.answer("Доступ запрещён", show_alert=True)
 
     count = await delete_dead_tokens()
@@ -274,7 +274,7 @@ async def unified_handler(msg: Message):
     if msg.text and msg.text.startswith("/"):
         return
 
-    if msg.chat.type == "private" and msg.from_user.id == ADMIN_ID and msg.from_user.id in expecting_tokens:
+    if msg.chat.type == "private" and msg.from_user.id in ADMIN_IDS and msg.from_user.id in expecting_tokens:
         if msg.text:
             lines = [line.strip() for line in msg.text.strip().split("\n") if line.strip()]
             tokens = []
@@ -304,7 +304,7 @@ async def unified_handler(msg: Message):
                 await msg.answer(f"✅ Загружено {loaded} токенов")
             else:
                 await msg.answer(f"⚠️ Все {skipped} токенов уже были в базе")
-            logger.info(f"Админ загрузил {loaded} токенов, {skipped} пропущено")
+            logger.info(f"Админ {msg.from_user.id} загрузил {loaded} токенов, {skipped} пропущено")
         return
 
     if msg.chat.type in ("group", "supergroup") and await is_group_approved(msg.chat.id) and msg.photo:
