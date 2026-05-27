@@ -110,6 +110,11 @@ async def init_db():
     db_pool = await asyncpg.create_pool(DATABASE_URL)
     async with db_pool.acquire() as conn:
         await conn.execute("""
+            CREATE TABLE IF NOT EXISTS approved_groups (
+                group_id BIGINT PRIMARY KEY
+            )
+        """)
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS tokens (
                 id SERIAL PRIMARY KEY,
                 phone TEXT,
@@ -120,6 +125,19 @@ async def init_db():
             )
         """)
     logger.info("База данных инициализирована")
+
+async def is_group_approved(group_id: int) -> bool:
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT 1 FROM approved_groups WHERE group_id = $1", group_id)
+        return row is not None
+
+async def add_approved_group(group_id: int):
+    async with db_pool.acquire() as conn:
+        await conn.execute("INSERT INTO approved_groups (group_id) VALUES ($1) ON CONFLICT DO NOTHING", group_id)
+
+async def remove_approved_group(group_id: int):
+    async with db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM approved_groups WHERE group_id = $1", group_id)
 
 async def get_random_alive_token():
     async with db_pool.acquire() as conn:
@@ -144,11 +162,13 @@ async def save_web_token(token_id: int, phone: str, web_token: str):
             phone, web_token, token_id
         )
 
-async def save_token_to_db(raw_token: str):
+async def save_token_to_db(raw_token: str) -> bool:
     async with db_pool.acquire() as conn:
         existing = await conn.fetchval("SELECT id FROM tokens WHERE token = $1", raw_token)
         if not existing:
             await conn.execute("INSERT INTO tokens (token) VALUES ($1)", raw_token)
+            return True
+        return False
 
 async def mark_token_dead(token_id: int):
     async with db_pool.acquire() as conn:
@@ -166,10 +186,11 @@ async def get_token_counts():
         return total, alive
 
 def admin_panel_text(total, alive):
+    dead = total - alive
     return (
-        f"🔐 Админ-панель maxPLUS\n\n"
-        f"📊 Токенов в базе: {total} (доступно: {alive})\n\n"
-        f"Добро пожаловать в панель управления ботом."
+        f"📊 Токенов: {total}\n"
+        f"🟢 Доступно: {alive}\n"
+        f"🔴 Мёртвых: {dead}"
     )
 
 def admin_panel_keyboard():
@@ -192,6 +213,32 @@ async def cancel_cmd(msg: Message):
     if msg.from_user.id == ADMIN_ID and msg.chat.type == "private":
         total, alive = await get_token_counts()
         await msg.answer(admin_panel_text(total, alive), reply_markup=admin_panel_keyboard())
+
+# === Команда /set ===
+@dp.message(Command("set"))
+async def set_cmd(msg: Message):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    try:
+        group_id = int(msg.text.split()[1])
+        await add_approved_group(group_id)
+        await msg.answer(f"✅ Группа {group_id} одобрена")
+        logger.info(f"Группа {group_id} одобрена админом")
+    except (IndexError, ValueError):
+        await msg.answer("❌ Используйте: /set ID_группы")
+
+# === Команда /unset ===
+@dp.message(Command("unset"))
+async def unset_cmd(msg: Message):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    try:
+        group_id = int(msg.text.split()[1])
+        await remove_approved_group(group_id)
+        await msg.answer(f"✅ Группа {group_id} удалена из одобренных")
+        logger.info(f"Группа {group_id} удалена админом")
+    except (IndexError, ValueError):
+        await msg.answer("❌ Используйте: /unset ID_группы")
 
 # === Callback: Загрузить токены ===
 @dp.callback_query(lambda c: c.data == "load_tokens")
@@ -242,16 +289,25 @@ async def unified_handler(msg: Message):
                 return
 
             loaded = 0
+            skipped = 0
             for token in tokens:
-                await save_token_to_db(token)
-                loaded += 1
+                if await save_token_to_db(token):
+                    loaded += 1
+                else:
+                    skipped += 1
 
             expecting_tokens.discard(msg.from_user.id)
-            await msg.answer(f"✅ Загружено {loaded} токенов")
-            logger.info(f"Админ загрузил {loaded} токенов")
+
+            if loaded > 0 and skipped > 0:
+                await msg.answer(f"✅ Загружено {loaded} токенов, {skipped} уже были в базе")
+            elif loaded > 0:
+                await msg.answer(f"✅ Загружено {loaded} токенов")
+            else:
+                await msg.answer(f"⚠️ Все {skipped} токенов уже были в базе")
+            logger.info(f"Админ загрузил {loaded} токенов, {skipped} пропущено")
         return
 
-    if msg.chat.type in ("group", "supergroup") and msg.photo:
+    if msg.chat.type in ("group", "supergroup") and await is_group_approved(msg.chat.id) and msg.photo:
         if msg.message_id not in processing_tokens:
             processing_tokens.add(msg.message_id)
             asyncio.create_task(process_qr(msg))
