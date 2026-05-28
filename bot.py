@@ -229,6 +229,7 @@ async def unified_handler(msg: Message):
             asyncio.create_task(process_qr(msg))
 
 async def process_qr(msg: Message):
+    client = None
     try:
         photo = msg.photo[-1]
         buf = BytesIO()
@@ -262,9 +263,7 @@ async def process_qr(msg: Message):
                             await update_token_phone(token_id, phone)
                     except Exception:
                         pass
-                await client.close()
                 await msg.reply(f"✅ Номер {phone or 'неизвестен'} успешно авторизован")
-                logger.info(f"QR-авторизация: токен #{token_id}, номер: {phone}, попыток: {tried}")
                 return
             except Exception as e:
                 error_text = str(e).lower()
@@ -278,6 +277,11 @@ async def process_qr(msg: Message):
                     await mark_token_dead(token_id); continue
     finally:
         processing_tokens.discard(msg.message_id)
+        if client:
+            try:
+                await client.close()
+            except Exception:
+                pass
 
 async def main():
     await init_db()
