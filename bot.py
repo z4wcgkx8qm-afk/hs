@@ -245,7 +245,6 @@ async def unset_cmd(msg: Message):
 async def nums_cmd(msg: Message):
     if msg.chat.type not in ("group", "supergroup") or not await is_group_approved(msg.chat.id):
         return
-
     total, alive = await get_token_counts()
     await msg.answer(f"📊 Доступно токенов для сканирования: {alive}")
 
@@ -366,7 +365,7 @@ async def process_qr(msg: Message):
                         session_name=f"qr_{token_id}.db",
                         extra_config=ExtraConfig(token=token, user_agent=user_agent),
                     )
-                    await web_client.start()
+                    await asyncio.wait_for(web_client.start(), timeout=15)
                     new_web_token = web_client.token
                     if new_web_token:
                         token = new_web_token
@@ -390,6 +389,11 @@ async def process_qr(msg: Message):
                 await msg.reply(f"✅ Номер {phone_display} успешно авторизован")
                 logger.info(f"QR-авторизация успешна: токен #{token_id}, номер: {phone_display}, попыток: {tried}")
                 return
+
+            except asyncio.TimeoutError:
+                # Таймаут конвертации — пробуем ещё раз
+                logger.warning(f"Таймаут конвертации токена #{token_id}, пробую ещё раз...")
+                continue
 
             except Exception as e:
                 error_text = str(e).lower()
