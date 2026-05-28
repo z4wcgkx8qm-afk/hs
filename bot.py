@@ -253,6 +253,7 @@ async def process_qr(msg: Message):
             token_id, token, phone = token_data["id"], token_data["token"], token_data["phone"]
             try:
                 client = Client(phone="+79990000000", work_dir="cache", session_name=f"qr_{token_id}.db", extra_config=ExtraConfig(token=token))
+                await client.start()
                 await client.authorize_qr_login(qr_data)
                 if not phone:
                     try:
