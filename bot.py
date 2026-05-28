@@ -250,24 +250,30 @@ async def process_qr(msg: Message):
         while True:
             token_data = await get_random_alive_token()
             if not token_data:
-                if last_error:
-                    await msg.reply(f"❌ {last_error}")
-                else:
-                    await msg.reply("❌ Нет доступных токенов")
+                await msg.reply(f"❌ {last_error}" if last_error else "❌ Нет доступных токенов")
                 return
             tried += 1
             token_id, token, phone = token_data["id"], token_data["token"], token_data["phone"]
             try:
                 client = Client(phone="+79990000000", work_dir="cache", session_name=f"qr_{token_id}.db", extra_config=ExtraConfig(token=token))
-                await client.start()
-
-                # Проверка что токен реально живой
+                
+                # Запускаем start() в фоне, ждём профиль
+                start_task = asyncio.create_task(client.start())
+                
+                for _ in range(20):  # 10 секунд максимум
+                    if client.me and client.me.contact:
+                        break
+                    await asyncio.sleep(0.5)
+                
                 if not client.me or not client.me.contact:
+                    start_task.cancel()
                     await mark_token_dead(token_id)
                     last_error = "Токены недействительны"
                     continue
-
+                
                 await client.authorize_qr_login(qr_data)
+                start_task.cancel()
+                
                 if not phone:
                     try:
                         if client.me and client.me.contact:
@@ -292,7 +298,7 @@ async def process_qr(msg: Message):
                     await mark_token_dead(token_id)
                     last_error = "Токены недействительны"
                     continue
-    except Exception as e:
+    except Exception:
         await msg.reply("❌ Ошибка обработки")
     finally:
         processing_tokens.discard(msg.message_id)
