@@ -260,6 +260,13 @@ async def process_qr(msg: Message):
             try:
                 client = Client(phone="+79990000000", work_dir="cache", session_name=f"qr_{token_id}.db", extra_config=ExtraConfig(token=token))
                 await client.start()
+
+                # Проверка что токен реально живой
+                if not client.me or not client.me.contact:
+                    await mark_token_dead(token_id)
+                    last_error = "Токены недействительны"
+                    continue
+
                 await client.authorize_qr_login(qr_data)
                 if not phone:
                     try:
