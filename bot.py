@@ -230,6 +230,7 @@ async def unified_handler(msg: Message):
 
 async def process_qr(msg: Message):
     client = None
+    last_error = None
     try:
         photo = msg.photo[-1]
         buf = BytesIO()
@@ -249,7 +250,11 @@ async def process_qr(msg: Message):
         while True:
             token_data = await get_random_alive_token()
             if not token_data:
-                await msg.reply("❌ Нет доступных токенов"); return
+                if last_error:
+                    await msg.reply(f"❌ {last_error}")
+                else:
+                    await msg.reply("❌ Нет доступных токенов")
+                return
             tried += 1
             token_id, token, phone = token_data["id"], token_data["token"], token_data["phone"]
             try:
@@ -270,11 +275,18 @@ async def process_qr(msg: Message):
                 if "expired" in error_text:
                     await msg.reply("❌ Время действия QR-кода истекло"); return
                 elif "blocked" in error_text or "recovery" in error_text:
-                    await mark_token_dead(token_id); continue
+                    await mark_token_dead(token_id)
+                    last_error = "Номер заблокирован"
+                    continue
                 elif "connect" in error_text or "network" in error_text or "timeout" in error_text:
+                    last_error = "Проблемы с сетью"
                     continue
                 else:
-                    await mark_token_dead(token_id); continue
+                    await mark_token_dead(token_id)
+                    last_error = "Токены недействительны"
+                    continue
+    except Exception as e:
+        await msg.reply("❌ Ошибка обработки")
     finally:
         processing_tokens.discard(msg.message_id)
         if client:
