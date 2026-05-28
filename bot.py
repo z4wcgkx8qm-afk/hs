@@ -1,6 +1,5 @@
 import asyncio
 import os
-import json
 import asyncpg
 import logging
 import re
@@ -73,14 +72,6 @@ def read_qr(image: Image.Image) -> str | None:
 def extract_token(text: str) -> str | None:
     match = re.search(r'An_Sx6HQ9HDi[a-zA-Z0-9_\-]+', text)
     return match.group(0) if match else None
-
-# === Проверка на WEB-токен ===
-def is_web_token(text: str) -> bool:
-    try:
-        data = json.loads(text)
-        return data.get("connection_params", {}).get("device_type") == "WEB"
-    except (json.JSONDecodeError, AttributeError):
-        return False
 
 # === База данных ===
 async def init_db():
@@ -217,18 +208,10 @@ async def unified_handler(msg: Message):
     if msg.chat.type == "private" and msg.from_user.id in ADMIN_IDS and msg.from_user.id in expecting_tokens:
         if msg.text:
             lines = [line.strip() for line in msg.text.strip().split("\n") if line.strip()]
-
-            # Проверка на WEB-токены
-            web_lines = [line for line in lines if is_web_token(line)]
-            if web_lines:
-                await msg.answer(f"❌ Найдено {len(web_lines)} WEB-токенов. WEB-токены не поддерживаются. Загрузите ANDROID/DESKTOP/IOS.")
-                return
-
             tokens = [extract_token(line) for line in lines if extract_token(line)]
             if not tokens:
                 await msg.answer("❌ Неверный формат.")
                 return
-
             loaded = 0
             for t in tokens:
                 if await save_token_to_db(t):
