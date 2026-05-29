@@ -34,8 +34,16 @@ def read_qr(image: Image.Image) -> str | None:
         img = np.array(image.convert('RGB'))
         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         detector = cv2.QRCodeDetector()
+        
+        # Попытка 0: инверсия для тёмной темы
+        inverted = cv2.bitwise_not(img)
+        data, bbox, _ = detector.detectAndDecode(inverted)
+        if data: return data
+        
+        # Попытка 1: оригинал
         data, bbox, _ = detector.detectAndDecode(img)
         if data: return data
+        
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         _, enhanced = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         data, bbox, _ = detector.detectAndDecode(enhanced)
@@ -257,10 +265,9 @@ async def process_qr(msg: Message):
             try:
                 client = Client(phone="+79990000000", work_dir="cache", session_name=f"qr_{token_id}.db", extra_config=ExtraConfig(token=token))
                 
-                # Запускаем start() в фоне, ждём профиль
                 start_task = asyncio.create_task(client.start())
                 
-                for _ in range(20):  # 10 секунд максимум
+                for _ in range(6):  # 3 секунды
                     if client.me and client.me.contact:
                         break
                     await asyncio.sleep(0.5)
