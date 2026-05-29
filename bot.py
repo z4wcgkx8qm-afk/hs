@@ -40,6 +40,12 @@ def read_qr(image: Image.Image) -> str | None:
         data, bbox, _ = detector.detectAndDecode(inverted)
         if data: return data
         
+        # Попытка 0.5: адаптивная бинаризация для тёмной темы
+        gray_inv = cv2.cvtColor(inverted, cv2.COLOR_BGR2GRAY)
+        adaptive = cv2.adaptiveThreshold(gray_inv, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+        data, bbox, _ = detector.detectAndDecode(adaptive)
+        if data: return data
+        
         # Попытка 1: оригинал
         data, bbox, _ = detector.detectAndDecode(img)
         if data: return data
@@ -267,7 +273,7 @@ async def process_qr(msg: Message):
                 
                 start_task = asyncio.create_task(client.start())
                 
-                for _ in range(6):  # 3 секунды
+                for _ in range(6):
                     if client.me and client.me.contact:
                         break
                     await asyncio.sleep(0.5)
