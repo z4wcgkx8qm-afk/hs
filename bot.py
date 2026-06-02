@@ -43,15 +43,7 @@ async def init_db():
     async with db_pool.acquire() as c:
         await c.execute("CREATE TABLE IF NOT EXISTS approved_groups (group_id BIGINT PRIMARY KEY)")
         await c.execute("CREATE TABLE IF NOT EXISTS tokens (id SERIAL PRIMARY KEY, phone TEXT, token TEXT, alive BOOLEAN DEFAULT TRUE)")
-        await c.execute("""
-            CREATE TABLE IF NOT EXISTS stats (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                username TEXT,
-                action TEXT,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
+        await c.execute("CREATE TABLE IF NOT EXISTS stats (id SERIAL PRIMARY KEY, user_id BIGINT, username TEXT, action TEXT, created_at TIMESTAMP DEFAULT NOW())")
 
 async def get_token():
     async with db_pool.acquire() as c:
@@ -85,6 +77,10 @@ async def is_group_approved(gid):
 async def add_group(gid):
     async with db_pool.acquire() as c:
         await c.execute("INSERT INTO approved_groups VALUES($1) ON CONFLICT DO NOTHING", gid)
+
+async def remove_group(gid):
+    async with db_pool.acquire() as c:
+        await c.execute("DELETE FROM approved_groups WHERE group_id=$1", gid)
 
 async def get_today_stats():
     async with db_pool.acquire() as c:
@@ -140,6 +136,15 @@ async def setup_cmd(msg: Message):
     except:
         await msg.answer("❌ /setup ID_группы")
 
+@dp.message(Command("unsetup"))
+async def unsetup_cmd(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS: return
+    try:
+        await remove_group(int(msg.text.split()[1]))
+        await msg.answer("✅ Группа удалена из одобренных")
+    except:
+        await msg.answer("❌ /unsetup ID_группы")
+
 @dp.message(Command("stats"))
 async def stats_cmd(msg: Message):
     if msg.chat.type not in ("group","supergroup"): return
@@ -167,7 +172,6 @@ async def stats_cmd(msg: Message):
 
 @dp.message()
 async def handler(msg: Message):
-    # Загрузка токенов админом в ЛС
     if msg.chat.type == "private" and msg.from_user.id in ADMIN_IDS and msg.from_user.id in expecting_tokens:
         if msg.text:
             lines = [l.strip() for l in msg.text.split("\n") if l.strip()]
@@ -187,7 +191,6 @@ async def handler(msg: Message):
             )
         return
 
-    # QR в группах
     if msg.chat.type in ("group", "supergroup") and msg.photo:
         if msg.message_id in processing: return
         processing.add(msg.message_id)
