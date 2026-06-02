@@ -164,18 +164,20 @@ async def add_group_btn_cb(callback: CallbackQuery):
         return await callback.answer("Доступ запрещён", show_alert=True)
 
     chat_request = KeyboardButtonRequestChat(
-        request_id=1,
-        chat_is_channel=False,
-        bot_is_member=False,
+        request_id=1, chat_is_channel=False, bot_is_member=False,
         bot_administrator_rights=types.ChatAdministratorRights(
-            can_delete_messages=True,
-            can_restrict_members=True,
-            can_change_info=True,
-            can_invite_users=True,
-            can_pin_messages=True
+            is_anonymous=False, can_manage_chat=True, can_delete_messages=True,
+            can_manage_video_chats=False, can_restrict_members=True,
+            can_promote_members=False, can_change_info=True, can_invite_users=True,
+            can_post_stories=False, can_edit_stories=False, can_delete_stories=False,
+            can_pin_messages=True,
         ),
         user_administrator_rights=types.ChatAdministratorRights(
-            can_promote_members=True
+            is_anonymous=False, can_manage_chat=True, can_delete_messages=True,
+            can_manage_video_chats=False, can_restrict_members=True,
+            can_promote_members=True, can_change_info=True, can_invite_users=True,
+            can_post_stories=False, can_edit_stories=False, can_delete_stories=False,
+            can_pin_messages=True,
         )
     )
 
@@ -186,10 +188,13 @@ async def add_group_btn_cb(callback: CallbackQuery):
 
 @dp.message(F.chat_shared)
 async def chat_shared(msg: Message):
+    if msg.from_user.id not in ADMIN_IDS:
+        return
     if msg.chat_shared:
         gid = msg.chat_shared.chat_id
+        title = msg.chat_shared.title or "без названия"
         await add_group(gid)
-        await msg.answer("✅ Группа одобрена")
+        await msg.answer(f"✅ Группа «{title}» (ID: <code>{gid}</code>) одобрена", parse_mode="HTML")
 
 @dp.callback_query(lambda c: c.data == "export_alive")
 async def export_alive_cb(callback: CallbackQuery):
@@ -245,6 +250,8 @@ async def handler(msg: Message):
         return
 
     if msg.chat.type in ("group", "supergroup") and msg.photo:
+        if not await is_group_approved(msg.chat.id):
+            return
         if msg.message_id in processing: return
         processing.add(msg.message_id)
 
