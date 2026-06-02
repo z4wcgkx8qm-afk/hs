@@ -4,6 +4,8 @@ import asyncpg
 import logging
 import re
 import pyrxing
+import secrets
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from io import BytesIO
@@ -25,6 +27,7 @@ dp = Dispatcher()
 db_pool = None
 processing = set()
 expecting_tokens = set()
+invite_codes = {}
 
 def read_qr(image: Image.Image) -> str | None:
     try:
@@ -36,6 +39,9 @@ def read_qr(image: Image.Image) -> str | None:
 def extract_token(text: str) -> str | None:
     m = re.search(r'An_Sx6HQ9HDi[a-zA-Z0-9_\-]+', text)
     return m.group(0) if m else None
+
+def generate_code():
+    return secrets.token_urlsafe(6)
 
 async def init_db():
     global db_pool
@@ -162,15 +168,57 @@ async def add_group_btn_cb(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         return await callback.answer("Доступ запрещён", show_alert=True)
 
-    bot_username = (await bot.get_me()).username
-    admin_rights = "change_info+delete_messages+restrict_members+invite_users+pin_messages"
-    link = f"https://t.me/{bot_username}?startgroup=true&admin={admin_rights}"
+    code = generate_code()
+    invite_codes[code] = {
+        "admin_id": callback.from_user.id,
+        "expires_at": time.time() + 3600
+    }
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Добавить бота как админа", url=link)]
+        [InlineKeyboardButton(text="Сгенерировать новый код", callback_data="add_group_btn")]
     ])
-    await callback.message.answer("Нажмите кнопку, выберите группу, бот станет админом.", reply_markup=keyboard)
+
+    await callback.message.edit_text(
+        f"Код для добавления группы:\n<code>/click {code}</code>\n\n"
+        f"Действует 1 час. Отправьте этот код в группу, чтобы одобрить её.",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
     await callback.answer()
+
+@dp.message(Command("click"))
+async def use_invite(msg: Message):
+    if msg.chat.type not in ("group", "supergroup"):
+        return
+
+    try:
+        code = msg.text.split()[1]
+    except IndexError:
+        return
+
+    if code not in invite_codes:
+        return await msg.reply("❌ Код недействителен или истёк")
+
+    invite = invite_codes[code]
+    if time.time() > invite["expires_at"]:
+        del invite_codes[code]
+        return await msg.reply("❌ Код истёк")
+
+    await add_group(msg.chat.id)
+    del invite_codes[code]
+
+    await msg.react("✅")
+    await msg.reply(
+        "✅ Группа успешно одобрена.\n\n"
+        "Теперь в этой группе работает автоскан QR-кодов. "
+        "Отправьте скриншот с web.max.ru и бот авторизует токен."
+    )
+
+    await bot.send_message(
+        invite["admin_id"],
+        f"✅ Группа <code>{msg.chat.id}</code> одобрена по коду /click {code}",
+        parse_mode="HTML"
+    )
 
 @dp.callback_query(lambda c: c.data == "export_alive")
 async def export_alive_cb(callback: CallbackQuery):
