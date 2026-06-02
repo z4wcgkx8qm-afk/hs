@@ -72,19 +72,11 @@ async def get_counts():
         dead = await c.fetchval("SELECT COUNT(*) FROM tokens WHERE alive=FALSE")
         return alive, dead
 
-async def get_today_stats():
-    msk = ZoneInfo("Europe/Moscow")
-    msk_now = datetime.now(msk)
-    today_start = msk_now.replace(hour=6, minute=0, second=0, microsecond=0)
-    if msk_now.hour < 6:
-        today_start = today_start.replace(day=today_start.day - 1)
-    today_start_naive = today_start.replace(tzinfo=None)
-    
+async def get_all_stats():
     async with db_pool.acquire() as c:
-        rows = await c.fetch("SELECT action FROM stats WHERE created_at >= $1", today_start_naive)
-        success = sum(1 for r in rows if r["action"] == "success")
-        fail = sum(1 for r in rows if r["action"] == "fail")
-        return success, fail
+        success = await c.fetchval("SELECT COUNT(*) FROM stats WHERE action='success'")
+        fail = await c.fetchval("SELECT COUNT(*) FROM stats WHERE action='fail'")
+        return success or 0, fail or 0
 
 async def export_tokens(alive_only: bool):
     async with db_pool.acquire() as c:
@@ -109,15 +101,13 @@ async def start(msg: Message):
 
 async def show_panel(msg_or_cb):
     alive, dead = await get_counts()
-    today_success, today_fail = await get_today_stats()
+    success, fail = await get_all_stats()
 
     text = (
-        f"🔐 <b>Faung Scan</b>\n\n"
         f"В наличии токенов: <code>{alive}</code>\n"
-        f"Мёртвых токенов: <code>{dead}</code>\n\n"
-        f"📊 <b>За сегодня (с 6:00 МСК)</b>\n"
-        f"Авторизовано: <code>{today_success}</code>\n"
-        f"Ошибок: <code>{today_fail}</code>"
+        f"Мёртвых токенов: <code>{dead}</code>\n"
+        f"Авторизовано: <code>{success}</code>\n"
+        f"Ошибок: <code>{fail}</code>"
     )
 
     if isinstance(msg_or_cb, CallbackQuery):
