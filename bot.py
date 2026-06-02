@@ -129,9 +129,8 @@ async def add_tokens_cb(callback: CallbackQuery):
         return await callback.answer("Доступ запрещён", show_alert=True)
     expecting_tokens.add(callback.from_user.id)
     await callback.message.answer(
-        "🔖 Отправьте мне токены ANDROID в любом формате.\n\n"
-        "<i>Чтобы закончить действие, введите /cancel</i>",
-        parse_mode="HTML"
+        "Отправьте мне токены ANDROID в любом формате. Можно кидать JSON, чистый токен или файл сессии. Каждый токен с новой строки\n\n"
+        "Чтобы закончить, введите /cancel"
     )
     await callback.answer()
 
