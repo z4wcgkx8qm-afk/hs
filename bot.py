@@ -5,7 +5,6 @@ import logging
 import re
 import numpy as np
 import cv2
-import requests
 from io import BytesIO
 from PIL import Image
 from aiogram import Bot, Dispatcher, F
@@ -22,7 +21,7 @@ ADMIN_IDS = {8540562276, 7742243877, 8706712229}
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-db_pool = None #71191919191
+db_pool = None
 expecting_tokens = set()
 processing_tokens = set()
 
@@ -31,53 +30,37 @@ def read_qr(image: Image.Image) -> str | None:
         img = np.array(image.convert('RGB'))
         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         detector = cv2.QRCodeDetector()
-        
-        data, _, _ = detector.detectAndDecode(img)
-        if data: return data
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        data, _, _ = detector.detectAndDecode(otsu)
-        if data: return data
-        adp = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
-        data, _, _ = detector.detectAndDecode(adp)
-        if data: return data
-        h, w = img.shape[:2]
-        scaled2 = cv2.resize(img, (w*2, h*2), interpolation=cv2.INTER_CUBIC)
-        data, _, _ = detector.detectAndDecode(scaled2)
-        if data: return data
-        scaled3 = cv2.resize(img, (w*3, h*3), interpolation=cv2.INTER_CUBIC)
-        data, _, _ = detector.detectAndDecode(scaled3)
-        if data: return data
-        inv = cv2.bitwise_not(img)
-        data, _, _ = detector.detectAndDecode(inv)
-        if data: return data
-        gray_inv = cv2.cvtColor(inv, cv2.COLOR_BGR2GRAY)
-        _, otsu_inv = cv2.threshold(gray_inv, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        data, _, _ = detector.detectAndDecode(otsu_inv)
-        if data: return data
-        adp_inv = cv2.adaptiveThreshold(gray_inv, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
-        data, _, _ = detector.detectAndDecode(adp_inv)
-        if data: return data
-        scaled_inv = cv2.resize(inv, (w*2, h*2), interpolation=cv2.INTER_CUBIC)
-        data, _, _ = detector.detectAndDecode(scaled_inv)
-        if data: return data
-        blurred = cv2.GaussianBlur(gray, (0,0), 3)
-        sharp = cv2.addWeighted(gray, 1.5, blurred, -0.5, 0)
-        _, binary = cv2.threshold(sharp, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        data, _, _ = detector.detectAndDecode(binary)
-        if data: return data
-        try:
-            buf = BytesIO()
-            image.save(buf, format='PNG')
-            buf.seek(0)
-            files = {'file': ('qr.png', buf, 'image/png')}
-            r = requests.post('https://api.qrserver.com/v1/read-qr-code/', files=files, timeout=10)
-            if r.status_code == 200:
-                result = r.json()
-                if result and result[0]['symbol'][0]['data']:
-                    return result[0]['symbol'][0]['data']
-        except Exception:
-            pass
+        avg_brightness = np.mean(gray)
+        
+        if avg_brightness < 128:
+            inv = cv2.bitwise_not(img)
+            data, _, _ = detector.detectAndDecode(inv)
+            if data: return data
+            gray_inv = cv2.cvtColor(inv, cv2.COLOR_BGR2GRAY)
+            _, otsu = cv2.threshold(gray_inv, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            data, _, _ = detector.detectAndDecode(otsu)
+            if data: return data
+            kernel = np.ones((3,3), np.uint8)
+            eroded = cv2.erode(inv, kernel, iterations=1)
+            data, _, _ = detector.detectAndDecode(eroded)
+            if data: return data
+            dilated = cv2.dilate(inv, kernel, iterations=1)
+            data, _, _ = detector.detectAndDecode(dilated)
+            if data: return data
+        else:
+            data, _, _ = detector.detectAndDecode(img)
+            if data: return data
+            _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            data, _, _ = detector.detectAndDecode(otsu)
+            if data: return data
+            adp = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+            data, _, _ = detector.detectAndDecode(adp)
+            if data: return data
+            h, w = img.shape[:2]
+            scaled = cv2.resize(img, (w*2, h*2), interpolation=cv2.INTER_CUBIC)
+            data, _, _ = detector.detectAndDecode(scaled)
+            if data: return data
         return None
     except:
         return None
@@ -90,22 +73,8 @@ async def init_db():
     global db_pool
     db_pool = await asyncpg.create_pool(DATABASE_URL)
     async with db_pool.acquire() as conn:
-        await conn.execute("CREATE TABLE IF NOT EXISTS approved_groups (group_id BIGINT PRIMARY KEY)")
         await conn.execute("CREATE TABLE IF NOT EXISTS tokens (id SERIAL PRIMARY KEY, phone TEXT, token TEXT, alive BOOLEAN DEFAULT TRUE, created_at TIMESTAMP DEFAULT NOW())")
     logger.info("База данных инициализирована")
-
-async def is_group_approved(group_id: int) -> bool:
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT 1 FROM approved_groups WHERE group_id = $1", group_id)
-        return row is not None
-
-async def add_approved_group(group_id: int):
-    async with db_pool.acquire() as conn:
-        await conn.execute("INSERT INTO approved_groups (group_id) VALUES ($1) ON CONFLICT DO NOTHING", group_id)
-
-async def remove_approved_group(group_id: int):
-    async with db_pool.acquire() as conn:
-        await conn.execute("DELETE FROM approved_groups WHERE group_id = $1", group_id)
 
 async def get_random_alive_token():
     async with db_pool.acquire() as conn:
@@ -161,27 +130,9 @@ async def cancel_cmd(msg: Message):
         total, alive = await get_token_counts()
         await msg.answer(admin_panel_text(total, alive), reply_markup=admin_panel_keyboard())
 
-@dp.message(Command("set"))
-async def set_cmd(msg: Message):
-    if msg.from_user.id not in ADMIN_IDS: return
-    try:
-        await add_approved_group(int(msg.text.split()[1]))
-        await msg.answer("✅ Группа одобрена")
-    except (IndexError, ValueError):
-        await msg.answer("❌ Используйте: /set ID_группы")
-
-@dp.message(Command("unset"))
-async def unset_cmd(msg: Message):
-    if msg.from_user.id not in ADMIN_IDS: return
-    try:
-        await remove_approved_group(int(msg.text.split()[1]))
-        await msg.answer("✅ Группа удалена")
-    except (IndexError, ValueError):
-        await msg.answer("❌ Используйте: /unset ID_группы")
-
 @dp.message(Command("nums"))
 async def nums_cmd(msg: Message):
-    if msg.chat.type in ("group", "supergroup") and await is_group_approved(msg.chat.id):
+    if msg.chat.type in ("group", "supergroup"):
         _, alive = await get_token_counts()
         await msg.answer(f"📊 Доступно токенов: {alive}")
 
@@ -224,7 +175,7 @@ async def unified_handler(msg: Message):
             else: await msg.answer(f"⚠️ Все {skipped} уже были в базе")
         return
 
-    if msg.chat.type in ("group", "supergroup") and await is_group_approved(msg.chat.id) and msg.photo:
+    if msg.chat.type in ("group", "supergroup") and msg.photo:
         if msg.message_id not in processing_tokens:
             processing_tokens.add(msg.message_id)
             asyncio.create_task(process_qr(msg))
