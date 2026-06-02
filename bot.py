@@ -4,7 +4,7 @@ import asyncpg
 import logging
 import re
 import pyrxing
-from datetime import datetime
+from datetime import datetime, time
 from zoneinfo import ZoneInfo
 from io import BytesIO
 from PIL import Image
@@ -70,27 +70,32 @@ async def get_counts():
     async with db_pool.acquire() as c:
         total = await c.fetchval("SELECT COUNT(*) FROM tokens")
         alive = await c.fetchval("SELECT COUNT(*) FROM tokens WHERE alive=TRUE")
-        success = await c.fetchval("SELECT COUNT(*) FROM stats WHERE action='success'")
-        today = await c.fetchval("SELECT COUNT(*) FROM stats WHERE action='success' AND created_at::date=CURRENT_DATE")
-        return total, alive, success or 0, today or 0
+        return total, alive
 
 async def get_today_stats():
+    msk_now = datetime.now(ZoneInfo("Europe/Moscow"))
+    today_start = msk_now.replace(hour=6, minute=0, second=0, microsecond=0)
+    if msk_now.hour < 6:
+        today_start = today_start.replace(day=today_start.day - 1)
+    
     async with db_pool.acquire() as c:
-        return await c.fetch("SELECT username, action FROM stats WHERE created_at::date=CURRENT_DATE")
+        rows = await c.fetch(
+            "SELECT username, action FROM stats WHERE created_at >= $1",
+            today_start
+        )
+        return rows, today_start
 
 @dp.message(Command("start"))
 async def start(msg: Message):
     if msg.chat.type != "private" or msg.from_user.id not in ADMIN_IDS:
         return
 
-    total, alive, success, today = await get_counts()
+    total, alive = await get_counts()
     dead = total - alive
 
     text = (
         f"🔐 <b>Faung Scan</b>\n\n"
         f"В наличии токенов: <code>{total}</code>\n"
-        f"Авторизовано всего: <code>{success}</code>\n"
-        f"Авторизовано за сегодня: <code>{today}</code>\n"
         f"Мёртвых токенов: <code>{dead}</code>"
     )
 
@@ -125,14 +130,12 @@ async def clear_dead_cb(callback: CallbackQuery):
     else:
         await callback.answer(f"Очищено {count} мёртвых сессий", show_alert=True)
 
-    total, alive, success, today = await get_counts()
+    total, alive = await get_counts()
     dead = total - alive
 
     text = (
         f"🔐 <b>Faung Scan</b>\n\n"
         f"В наличии токенов: <code>{total}</code>\n"
-        f"Авторизовано всего: <code>{success}</code>\n"
-        f"Авторизовано за сегодня: <code>{today}</code>\n"
         f"Мёртвых токенов: <code>{dead}</code>"
     )
 
@@ -151,12 +154,8 @@ async def cancel(msg: Message):
 async def stats_cmd(msg: Message):
     if msg.chat.type not in ("group","supergroup"): return
 
-    rows = await get_today_stats()
-    msk = datetime.now(ZoneInfo("Europe/Moscow")).strftime("%d.%m.%Y, %H:%M")
-
-    if not rows:
-        await msg.answer(f"📊 Стата за сегодня ({msk} МСК)\n\nНет данных")
-        return
+    rows, today_start = await get_today_stats()
+    msk = datetime.now(ZoneInfo("Europe/Moscow")).strftime("%H:%M МСК")
 
     users = {}
     for r in rows:
@@ -165,15 +164,22 @@ async def stats_cmd(msg: Message):
         if r["action"] == "success": users[u]["success"] += 1
         else: users[u]["fail"] += 1
 
-    text = f"📊 Стата за сегодня ({msk} МСК)\n\n"
-    text += "┌──────────────────────────────┐\n"
-    text += "│ User          ✅   ❌   🔄  │\n"
-    text += "├──────────────────────────────┤\n"
-    for u, d in users.items():
-        name = u[:12]
-        text += f"│ {name:<12}  {d['success']:<3}  {d['fail']:<3}  {d['success']+d['fail']:<3} │\n"
-    text += "└──────────────────────────────┘"
-    await msg.answer(f"<pre>{text}</pre>", parse_mode="HTML")
+    total_success = sum(d["success"] for d in users.values())
+    total_fail = sum(d["fail"] for d in users.values())
+
+    text = f"📊 Статистика за сегодня (с 6:00, {msk})\n\n"
+    text += f"✅ Авторизовано: {total_success}\n"
+    text += f"❌ Ошибок: {total_fail}\n\n"
+
+    if users:
+        text += "По пользователям:\n"
+        for u, d in users.items():
+            name = u[:15]
+            text += f"• {name}: {d['success']} успешно, {d['fail']} ошибок\n"
+    else:
+        text += "Нет данных за сегодня."
+
+    await msg.answer(text)
 
 @dp.message()
 async def handler(msg: Message):
