@@ -25,8 +25,10 @@ processing = set()
 def read_qr(image: Image.Image) -> str | None:
     try:
         results = pyrxing.read_barcodes(image.convert('L'))
+        logger.info(f"pyrxing результатов: {len(results) if results else 0}")
         return results[0].text if results else None
-    except:
+    except Exception as e:
+        logger.error(f"pyrxing ошибка: {e}")
         return None
 
 def extract_token(text: str) -> str | None:
@@ -86,6 +88,7 @@ async def qr(msg: Message):
     if msg.chat.type not in ("group", "supergroup"): return
     if msg.message_id in processing: return
     processing.add(msg.message_id)
+    logger.info(f"📸 Фото от {msg.from_user.id} в чате {msg.chat.id}")
 
     try:
         photo = msg.photo[-1]
@@ -93,7 +96,12 @@ async def qr(msg: Message):
         await bot.download(photo, destination=buf)
         buf.seek(0)
         img = Image.open(buf)
+        logger.info(f"🖼 Изображение: {img.size}, mode={img.mode}, размер={buf.getbuffer().nbytes} байт")
+        
         qr_data = read_qr(img)
+        logger.info(f"📱 QR: {'найден' if qr_data else 'НЕ найден'}")
+        if qr_data:
+            logger.info(f"🔗 Ссылка: {qr_data[:100]}...")
 
         if not qr_data:
             await msg.reply("Не удалось распознать QR-код.\nУбедись, что скриншот чёткий и содержит QR с web.max.ru")
@@ -111,6 +119,7 @@ async def qr(msg: Message):
                 return
 
             tried += 1
+            logger.info(f"🔄 Попытка #{tried}, токен #{t['id']}")
             try:
                 c = Client(
                     phone="+79990000000",
@@ -125,22 +134,22 @@ async def qr(msg: Message):
                 if not c.me or not c.me.contact:
                     task.cancel()
                     await kill(t['id'])
+                    logger.info(f"❌ Токен #{t['id']} мёртв")
                     continue
 
                 await c.authorize_qr_login(qr_data)
                 task.cancel()
 
                 phone = c.me.contact.phone if c.me and c.me.contact else "неизвестен"
+                logger.info(f"✅ Успех: {phone}")
                 await msg.reply(f"Номер {phone} успешно авторизован.\nТокен обработан.")
                 return
 
             except Exception as e:
                 err = str(e).lower()
+                logger.error(f"❌ Ошибка: {err[:100]}")
                 if "expired" in err:
-                    await msg.reply(
-                        "QR-код устарел.\n"
-                        "Сделай новый скриншот с web.max.ru и отправь снова."
-                    )
+                    await msg.reply("QR-код устарел.\nСделай новый скриншот с web.max.ru и отправь снова.")
                     return
                 elif "blocked" in err or "recovery" in err:
                     await kill(t['id'])
@@ -151,13 +160,12 @@ async def qr(msg: Message):
                     await kill(t['id'])
                     continue
 
-    except Exception:
-        await msg.reply(
-            "Произошла ошибка при обработке.\n"
-            "Попробуй ещё раз или проверь токены."
-        )
+    except Exception as e:
+        logger.error(f"💥 Критическая ошибка: {e}")
+        await msg.reply("Произошла ошибка при обработке.\nПопробуй ещё раз или проверь токены.")
     finally:
         processing.discard(msg.message_id)
+        logger.info("🏁 Обработка завершена")
 
 async def main():
     await init_db()
