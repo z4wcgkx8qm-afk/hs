@@ -68,9 +68,9 @@ async def log_stat(user_id, username, action):
 
 async def get_counts():
     async with db_pool.acquire() as c:
-        total = await c.fetchval("SELECT COUNT(*) FROM tokens")
         alive = await c.fetchval("SELECT COUNT(*) FROM tokens WHERE alive=TRUE")
-        return total, alive
+        dead = await c.fetchval("SELECT COUNT(*) FROM tokens WHERE alive=FALSE")
+        return alive, dead
 
 async def get_today_stats():
     msk = ZoneInfo("Europe/Moscow")
@@ -84,14 +84,29 @@ async def get_today_stats():
         rows = await c.fetch("SELECT username, action FROM stats WHERE created_at >= $1", today_start_naive)
         return rows
 
+async def export_tokens(alive_only: bool):
+    async with db_pool.acquire() as c:
+        if alive_only:
+            rows = await c.fetch("SELECT token FROM tokens WHERE alive=TRUE AND token IS NOT NULL")
+        else:
+            rows = await c.fetch("SELECT token FROM tokens WHERE alive=FALSE AND token IS NOT NULL")
+        return [r["token"] for r in rows]
+
+def main_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Добавить токены", callback_data="add_tokens")],
+        [InlineKeyboardButton(text="Очистить мёртвые сессии", callback_data="clear_dead")],
+        [InlineKeyboardButton(text="Выгрузить сессии", callback_data="export_sessions")]
+    ])
+
 @dp.message(Command("start"))
 async def start(msg: Message):
     if msg.chat.type != "private" or msg.from_user.id not in ADMIN_IDS:
         return
+    await show_panel(msg)
 
-    total, alive = await get_counts()
-    dead = total - alive
-
+async def show_panel(msg_or_cb):
+    alive, dead = await get_counts()
     rows = await get_today_stats()
     users = {}
     for r in rows:
@@ -105,7 +120,7 @@ async def start(msg: Message):
 
     text = (
         f"🔐 <b>Faung Scan</b>\n\n"
-        f"В наличии токенов: <code>{total}</code>\n"
+        f"В наличии токенов: <code>{alive}</code>\n"
         f"Мёртвых токенов: <code>{dead}</code>\n\n"
         f"📊 <b>За сегодня (с 6:00 МСК)</b>\n"
         f"Авторизовано: <code>{today_success}</code>\n"
@@ -118,12 +133,10 @@ async def start(msg: Message):
             name = u[:15]
             text += f"• {name}: {d['success']} успешно, {d['fail']} ошибок\n"
 
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Добавить токены", callback_data="add_tokens")],
-        [InlineKeyboardButton(text="Очистить мёртвые сессии", callback_data="clear_dead")]
-    ])
-
-    await msg.answer(text, reply_markup=keyboard, parse_mode="HTML")
+    if isinstance(msg_or_cb, CallbackQuery):
+        await msg_or_cb.message.edit_text(text, reply_markup=main_keyboard(), parse_mode="HTML")
+    else:
+        await msg_or_cb.answer(text, reply_markup=main_keyboard(), parse_mode="HTML")
 
 @dp.callback_query(lambda c: c.data == "add_tokens")
 async def add_tokens_cb(callback: CallbackQuery):
@@ -148,37 +161,53 @@ async def clear_dead_cb(callback: CallbackQuery):
         await callback.answer("Нет мёртвых сессий", show_alert=True)
     else:
         await callback.answer(f"Очищено {count} мёртвых сессий", show_alert=True)
+    await show_panel(callback)
 
-    total, alive = await get_counts()
-    dead = total - alive
-    rows = await get_today_stats()
-    users = {}
-    for r in rows:
-        u = r["username"] or "неизвестен"
-        if u not in users: users[u] = {"success": 0, "fail": 0}
-        if r["action"] == "success": users[u]["success"] += 1
-        else: users[u]["fail"] += 1
-    today_success = sum(d["success"] for d in users.values())
-    today_fail = sum(d["fail"] for d in users.values())
+@dp.callback_query(lambda c: c.data == "export_sessions")
+async def export_sessions_cb(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("Доступ запрещён", show_alert=True)
 
-    text = (
-        f"🔐 <b>Faung Scan</b>\n\n"
-        f"В наличии токенов: <code>{total}</code>\n"
-        f"Мёртвых токенов: <code>{dead}</code>\n\n"
-        f"📊 <b>За сегодня (с 6:00 МСК)</b>\n"
-        f"Авторизовано: <code>{today_success}</code>\n"
-        f"Ошибок: <code>{today_fail}</code>"
-    )
-    if users:
-        text += "\n\nПо пользователям:\n"
-        for u, d in users.items():
-            name = u[:15]
-            text += f"• {name}: {d['success']} успешно, {d['fail']} ошибок\n"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Выгрузить живые", callback_data="export_alive"),
+         InlineKeyboardButton(text="Выгрузить мёртвые", callback_data="export_dead")],
+        [InlineKeyboardButton(text="Назад", callback_data="back_to_panel")]
+    ])
+    await callback.message.edit_text("Выберите тип выгрузки:", reply_markup=keyboard)
+    await callback.answer()
 
-    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Добавить токены", callback_data="add_tokens")],
-        [InlineKeyboardButton(text="Очистить мёртвые сессии", callback_data="clear_dead")]
-    ]), parse_mode="HTML")
+@dp.callback_query(lambda c: c.data == "export_alive")
+async def export_alive_cb(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("Доступ запрещён", show_alert=True)
+
+    tokens = await export_tokens(alive_only=True)
+    if not tokens:
+        return await callback.answer("Нет живых токенов", show_alert=True)
+
+    file = BytesIO("\n".join(tokens).encode())
+    file.name = "alive_tokens.txt"
+    await callback.message.answer_document(file, caption=f"Живых токенов: {len(tokens)}")
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "export_dead")
+async def export_dead_cb(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("Доступ запрещён", show_alert=True)
+
+    tokens = await export_tokens(alive_only=False)
+    if not tokens:
+        return await callback.answer("Нет мёртвых токенов", show_alert=True)
+
+    file = BytesIO("\n".join(tokens).encode())
+    file.name = "dead_tokens.txt"
+    await callback.message.answer_document(file, caption=f"Мёртвых токенов: {len(tokens)}")
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "back_to_panel")
+async def back_to_panel_cb(callback: CallbackQuery):
+    await show_panel(callback)
+    await callback.answer()
 
 @dp.message(Command("cancel"))
 async def cancel(msg: Message):
@@ -233,7 +262,7 @@ async def handler(msg: Message):
             while True:
                 t = await get_token()
                 if not t:
-                    await msg.reply("❌ Нет доступных токенов. Загрузите токены через /add в личные сообщения")
+                    await msg.reply("❌ Нет доступных токенов. Загрузите токены через кнопку в личные сообщения")
                     return
 
                 tried += 1
