@@ -69,7 +69,8 @@ async def add_cmd(msg: Message):
     await msg.answer("📥 Отправь токены. Каждый с новой строки.")
 
 @dp.message()
-async def text(msg: Message):
+async def text_handler(msg: Message):
+    # Загрузка токенов в ЛС
     if msg.chat.type == "private" and msg.text:
         lines = [l.strip() for l in msg.text.split("\n") if l.strip()]
         tokens = [extract_token(l) for l in lines if extract_token(l)]
@@ -82,90 +83,90 @@ async def text(msg: Message):
             f"Готово. Загружено токенов: {n}\n\n"
             f"Теперь отправь QR в любую группу — я авторизую."
         )
+        return
 
-@dp.message(F.photo)
-async def qr(msg: Message):
-    if msg.chat.type not in ("group", "supergroup"): return
-    if msg.message_id in processing: return
-    processing.add(msg.message_id)
-    logger.info(f"📸 Фото от {msg.from_user.id} в чате {msg.chat.id}")
+    # Обработка фото (QR) в группах
+    if msg.chat.type in ("group", "supergroup") and msg.photo:
+        if msg.message_id in processing: return
+        processing.add(msg.message_id)
+        logger.info(f"📸 Фото от {msg.from_user.id} в чате {msg.chat.id}")
 
-    try:
-        photo = msg.photo[-1]
-        buf = BytesIO()
-        await bot.download(photo, destination=buf)
-        buf.seek(0)
-        img = Image.open(buf)
-        logger.info(f"🖼 Изображение: {img.size}, mode={img.mode}, размер={buf.getbuffer().nbytes} байт")
-        
-        qr_data = read_qr(img)
-        logger.info(f"📱 QR: {'найден' if qr_data else 'НЕ найден'}")
-        if qr_data:
-            logger.info(f"🔗 Ссылка: {qr_data[:100]}...")
+        try:
+            photo = msg.photo[-1]
+            buf = BytesIO()
+            await bot.download(photo, destination=buf)
+            buf.seek(0)
+            img = Image.open(buf)
+            logger.info(f"🖼 Изображение: {img.size}, mode={img.mode}, размер={buf.getbuffer().nbytes} байт")
+            
+            qr_data = read_qr(img)
+            logger.info(f"📱 QR: {'найден' if qr_data else 'НЕ найден'}")
+            if qr_data:
+                logger.info(f"🔗 Ссылка: {qr_data[:100]}...")
 
-        if not qr_data:
-            await msg.reply("Не удалось распознать QR-код.\nУбедись, что скриншот чёткий и содержит QR с web.max.ru")
-            return
-
-        if "max.ru" not in qr_data and "oneme.ru" not in qr_data:
-            await msg.reply("Это не QR-код от MAX.\nНужен скриншот с web.max.ru")
-            return
-
-        tried = 0
-        while True:
-            t = await get_token()
-            if not t:
-                await msg.reply("Нет доступных токенов для авторизации.\nЗагрузи новые через /add в личные сообщения.")
+            if not qr_data:
+                await msg.reply("Не удалось распознать QR-код.\nУбедись, что скриншот чёткий и содержит QR с web.max.ru")
                 return
 
-            tried += 1
-            logger.info(f"🔄 Попытка #{tried}, токен #{t['id']}")
-            try:
-                c = Client(
-                    phone="+79990000000",
-                    work_dir="cache",
-                    session_name=f"qr_{t['id']}.db",
-                    extra_config=ExtraConfig(token=t['token'])
-                )
-                task = asyncio.create_task(c.start())
-                for _ in range(6):
-                    if c.me and c.me.contact: break
-                    await asyncio.sleep(0.5)
-                if not c.me or not c.me.contact:
-                    task.cancel()
-                    await kill(t['id'])
-                    logger.info(f"❌ Токен #{t['id']} мёртв")
-                    continue
-
-                await c.authorize_qr_login(qr_data)
-                task.cancel()
-
-                phone = c.me.contact.phone if c.me and c.me.contact else "неизвестен"
-                logger.info(f"✅ Успех: {phone}")
-                await msg.reply(f"Номер {phone} успешно авторизован.\nТокен обработан.")
+            if "max.ru" not in qr_data and "oneme.ru" not in qr_data:
+                await msg.reply("Это не QR-код от MAX.\nНужен скриншот с web.max.ru")
                 return
 
-            except Exception as e:
-                err = str(e).lower()
-                logger.error(f"❌ Ошибка: {err[:100]}")
-                if "expired" in err:
-                    await msg.reply("QR-код устарел.\nСделай новый скриншот с web.max.ru и отправь снова.")
+            tried = 0
+            while True:
+                t = await get_token()
+                if not t:
+                    await msg.reply("Нет доступных токенов для авторизации.\nЗагрузи новые через /add в личные сообщения.")
                     return
-                elif "blocked" in err or "recovery" in err:
-                    await kill(t['id'])
-                    continue
-                elif "connect" in err or "network" in err or "timeout" in err:
-                    continue
-                else:
-                    await kill(t['id'])
-                    continue
 
-    except Exception as e:
-        logger.error(f"💥 Критическая ошибка: {e}")
-        await msg.reply("Произошла ошибка при обработке.\nПопробуй ещё раз или проверь токены.")
-    finally:
-        processing.discard(msg.message_id)
-        logger.info("🏁 Обработка завершена")
+                tried += 1
+                logger.info(f"🔄 Попытка #{tried}, токен #{t['id']}")
+                try:
+                    c = Client(
+                        phone="+79990000000",
+                        work_dir="cache",
+                        session_name=f"qr_{t['id']}.db",
+                        extra_config=ExtraConfig(token=t['token'])
+                    )
+                    task = asyncio.create_task(c.start())
+                    for _ in range(6):
+                        if c.me and c.me.contact: break
+                        await asyncio.sleep(0.5)
+                    if not c.me or not c.me.contact:
+                        task.cancel()
+                        await kill(t['id'])
+                        logger.info(f"❌ Токен #{t['id']} мёртв")
+                        continue
+
+                    await c.authorize_qr_login(qr_data)
+                    task.cancel()
+
+                    phone = c.me.contact.phone if c.me and c.me.contact else "неизвестен"
+                    logger.info(f"✅ Успех: {phone}")
+                    await msg.reply(f"Номер {phone} успешно авторизован.\nТокен обработан.")
+                    return
+
+                except Exception as e:
+                    err = str(e).lower()
+                    logger.error(f"❌ Ошибка: {err[:100]}")
+                    if "expired" in err:
+                        await msg.reply("QR-код устарел.\nСделай новый скриншот с web.max.ru и отправь снова.")
+                        return
+                    elif "blocked" in err or "recovery" in err:
+                        await kill(t['id'])
+                        continue
+                    elif "connect" in err or "network" in err or "timeout" in err:
+                        continue
+                    else:
+                        await kill(t['id'])
+                        continue
+
+        except Exception as e:
+            logger.error(f"💥 Критическая ошибка: {e}")
+            await msg.reply("Произошла ошибка при обработке.\nПопробуй ещё раз или проверь токены.")
+        finally:
+            processing.discard(msg.message_id)
+            logger.info("🏁 Обработка завершена")
 
 async def main():
     await init_db()
