@@ -4,7 +4,7 @@ import asyncpg
 import logging
 import re
 import pyrxing
-from datetime import datetime, time
+from datetime import datetime
 from zoneinfo import ZoneInfo
 from io import BytesIO
 from PIL import Image
@@ -73,15 +73,18 @@ async def get_counts():
         return total, alive
 
 async def get_today_stats():
-    msk_now = datetime.now(ZoneInfo("Europe/Moscow"))
+    msk = ZoneInfo("Europe/Moscow")
+    msk_now = datetime.now(msk)
     today_start = msk_now.replace(hour=6, minute=0, second=0, microsecond=0)
     if msk_now.hour < 6:
         today_start = today_start.replace(day=today_start.day - 1)
     
+    today_start_naive = today_start.replace(tzinfo=None)
+    
     async with db_pool.acquire() as c:
         rows = await c.fetch(
             "SELECT username, action FROM stats WHERE created_at >= $1",
-            today_start
+            today_start_naive
         )
         return rows, today_start
 
