@@ -10,7 +10,7 @@ from io import BytesIO
 from PIL import Image
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BufferedInputFile
 from pymax import Client, ExtraConfig
 
 logging.basicConfig(level=logging.INFO)
@@ -185,8 +185,7 @@ async def export_alive_cb(callback: CallbackQuery):
     if not tokens:
         return await callback.answer("Нет живых токенов", show_alert=True)
 
-    file = BytesIO("\n".join(tokens).encode())
-    file.name = "alive_tokens.txt"
+    file = BufferedInputFile("\n".join(tokens).encode(), filename="alive_tokens.txt")
     await callback.message.answer_document(file, caption=f"Живых токенов: {len(tokens)}")
     await callback.answer()
 
@@ -199,8 +198,7 @@ async def export_dead_cb(callback: CallbackQuery):
     if not tokens:
         return await callback.answer("Нет мёртвых токенов", show_alert=True)
 
-    file = BytesIO("\n".join(tokens).encode())
-    file.name = "dead_tokens.txt"
+    file = BufferedInputFile("\n".join(tokens).encode(), filename="dead_tokens.txt")
     await callback.message.answer_document(file, caption=f"Мёртвых токенов: {len(tokens)}")
     await callback.answer()
 
