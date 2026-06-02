@@ -78,15 +78,11 @@ async def get_today_stats():
     today_start = msk_now.replace(hour=6, minute=0, second=0, microsecond=0)
     if msk_now.hour < 6:
         today_start = today_start.replace(day=today_start.day - 1)
-    
     today_start_naive = today_start.replace(tzinfo=None)
     
     async with db_pool.acquire() as c:
-        rows = await c.fetch(
-            "SELECT username, action FROM stats WHERE created_at >= $1",
-            today_start_naive
-        )
-        return rows, today_start
+        rows = await c.fetch("SELECT username, action FROM stats WHERE created_at >= $1", today_start_naive)
+        return rows
 
 @dp.message(Command("start"))
 async def start(msg: Message):
@@ -96,11 +92,31 @@ async def start(msg: Message):
     total, alive = await get_counts()
     dead = total - alive
 
+    rows = await get_today_stats()
+    users = {}
+    for r in rows:
+        u = r["username"] or "неизвестен"
+        if u not in users: users[u] = {"success": 0, "fail": 0}
+        if r["action"] == "success": users[u]["success"] += 1
+        else: users[u]["fail"] += 1
+
+    today_success = sum(d["success"] for d in users.values())
+    today_fail = sum(d["fail"] for d in users.values())
+
     text = (
         f"🔐 <b>Faung Scan</b>\n\n"
         f"В наличии токенов: <code>{total}</code>\n"
-        f"Мёртвых токенов: <code>{dead}</code>"
+        f"Мёртвых токенов: <code>{dead}</code>\n\n"
+        f"📊 <b>За сегодня (с 6:00 МСК)</b>\n"
+        f"Авторизовано: <code>{today_success}</code>\n"
+        f"Ошибок: <code>{today_fail}</code>"
     )
+
+    if users:
+        text += "\n\nПо пользователям:\n"
+        for u, d in users.items():
+            name = u[:15]
+            text += f"• {name}: {d['success']} успешно, {d['fail']} ошибок\n"
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Добавить токены", callback_data="add_tokens")],
@@ -135,12 +151,29 @@ async def clear_dead_cb(callback: CallbackQuery):
 
     total, alive = await get_counts()
     dead = total - alive
+    rows = await get_today_stats()
+    users = {}
+    for r in rows:
+        u = r["username"] or "неизвестен"
+        if u not in users: users[u] = {"success": 0, "fail": 0}
+        if r["action"] == "success": users[u]["success"] += 1
+        else: users[u]["fail"] += 1
+    today_success = sum(d["success"] for d in users.values())
+    today_fail = sum(d["fail"] for d in users.values())
 
     text = (
         f"🔐 <b>Faung Scan</b>\n\n"
         f"В наличии токенов: <code>{total}</code>\n"
-        f"Мёртвых токенов: <code>{dead}</code>"
+        f"Мёртвых токенов: <code>{dead}</code>\n\n"
+        f"📊 <b>За сегодня (с 6:00 МСК)</b>\n"
+        f"Авторизовано: <code>{today_success}</code>\n"
+        f"Ошибок: <code>{today_fail}</code>"
     )
+    if users:
+        text += "\n\nПо пользователям:\n"
+        for u, d in users.items():
+            name = u[:15]
+            text += f"• {name}: {d['success']} успешно, {d['fail']} ошибок\n"
 
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Добавить токены", callback_data="add_tokens")],
@@ -152,37 +185,6 @@ async def cancel(msg: Message):
     if msg.from_user.id in ADMIN_IDS and msg.chat.type == "private":
         expecting_tokens.discard(msg.from_user.id)
         await msg.answer("❌ Загрузка токенов отменена.")
-
-@dp.message(Command("stats"))
-async def stats_cmd(msg: Message):
-    if msg.chat.type not in ("group","supergroup"): return
-
-    rows, today_start = await get_today_stats()
-    msk = datetime.now(ZoneInfo("Europe/Moscow")).strftime("%H:%M МСК")
-
-    users = {}
-    for r in rows:
-        u = r["username"] or "неизвестен"
-        if u not in users: users[u] = {"success": 0, "fail": 0}
-        if r["action"] == "success": users[u]["success"] += 1
-        else: users[u]["fail"] += 1
-
-    total_success = sum(d["success"] for d in users.values())
-    total_fail = sum(d["fail"] for d in users.values())
-
-    text = f"📊 Статистика за сегодня (с 6:00, {msk})\n\n"
-    text += f"✅ Авторизовано: {total_success}\n"
-    text += f"❌ Ошибок: {total_fail}\n\n"
-
-    if users:
-        text += "По пользователям:\n"
-        for u, d in users.items():
-            name = u[:15]
-            text += f"• {name}: {d['success']} успешно, {d['fail']} ошибок\n"
-    else:
-        text += "Нет данных за сегодня."
-
-    await msg.answer(text)
 
 @dp.message()
 async def handler(msg: Message):
