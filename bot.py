@@ -1,19 +1,16 @@
-
 import asyncio
 import os
 import asyncpg
 import logging
 import re
 import pyrxing
-import secrets
-import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from io import BytesIO
 from PIL import Image
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BufferedInputFile
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BufferedInputFile, ChatMemberUpdated
 from pymax import Client, ExtraConfig
 
 logging.basicConfig(level=logging.INFO)
@@ -28,7 +25,6 @@ dp = Dispatcher()
 db_pool = None
 processing = set()
 expecting_tokens = set()
-invite_codes = {}
 
 def read_qr(image: Image.Image) -> str | None:
     try:
@@ -41,9 +37,6 @@ def extract_token(text: str) -> str | None:
     m = re.search(r'An_Sx6HQ9HDi[a-zA-Z0-9_\-]+', text)
     return m.group(0) if m else None
 
-def generate_code():
-    return secrets.token_urlsafe(6)
-
 async def init_db():
     global db_pool
     db_pool = await asyncpg.create_pool(DATABASE_URL)
@@ -51,7 +44,6 @@ async def init_db():
         await c.execute("CREATE TABLE IF NOT EXISTS approved_groups (group_id BIGINT PRIMARY KEY)")
         await c.execute("CREATE TABLE IF NOT EXISTS tokens (id SERIAL PRIMARY KEY, phone TEXT, token TEXT, alive BOOLEAN DEFAULT TRUE)")
         await c.execute("CREATE TABLE IF NOT EXISTS stats (id SERIAL PRIMARY KEY, user_id BIGINT, username TEXT, action TEXT, created_at TIMESTAMP DEFAULT NOW())")
-        await c.execute("CREATE TABLE IF NOT EXISTS invites (code TEXT PRIMARY KEY, admin_id BIGINT, expires_at FLOAT)")
 
 async def is_group_approved(gid):
     async with db_pool.acquire() as c:
@@ -60,18 +52,6 @@ async def is_group_approved(gid):
 async def add_group(gid):
     async with db_pool.acquire() as c:
         await c.execute("INSERT INTO approved_groups VALUES($1) ON CONFLICT DO NOTHING", gid)
-
-async def save_invite(code, admin_id, expires_at):
-    async with db_pool.acquire() as c:
-        await c.execute("INSERT INTO invites VALUES($1,$2,$3)", code, admin_id, expires_at)
-
-async def get_invite(code):
-    async with db_pool.acquire() as c:
-        return await c.fetchrow("SELECT * FROM invites WHERE code=$1", code)
-
-async def delete_invite(code):
-    async with db_pool.acquire() as c:
-        await c.execute("DELETE FROM invites WHERE code=$1", code)
 
 async def get_token():
     async with db_pool.acquire() as c:
@@ -182,65 +162,29 @@ async def add_group_btn_cb(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         return await callback.answer("Доступ запрещён", show_alert=True)
 
-    code = generate_code()
-    expires = time.time() + 3600
-    invite_codes[code] = {"admin_id": callback.from_user.id, "expires_at": expires}
-    await save_invite(code, callback.from_user.id, expires)
+    bot_username = (await bot.get_me()).username
+    link = f"https://t.me/{bot_username}?startgroup=true"
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Сгенерировать новый код", callback_data="add_group_btn")],
+        [InlineKeyboardButton(text="Добавить бота в группу", url=link)],
         [InlineKeyboardButton(text="Назад", callback_data="back_to_panel")]
     ])
 
     await callback.message.edit_text(
-        f"Код для добавления группы:\n<code>/click {code}</code>\n\n"
-        f"Действует 1 час. Отправьте этот код в группу, чтобы одобрить её.",
-        reply_markup=keyboard,
-        parse_mode="HTML"
+        "Добавьте бота в группу, чтобы активировать автоскан QR-кодов.",
+        reply_markup=keyboard
     )
     await callback.answer()
 
-@dp.message(Command("click"))
-async def use_invite(msg: Message):
-    if msg.chat.type not in ("group", "supergroup"):
-        return
-
-    try:
-        code = msg.text.split()[1]
-    except IndexError:
-        return
-
-    # Проверяем в памяти
-    invite = invite_codes.get(code)
-    if not invite:
-        # Проверяем в базе
-        row = await get_invite(code)
-        if row:
-            invite = {"admin_id": row["admin_id"], "expires_at": row["expires_at"]}
+@dp.my_chat_member()
+async def bot_added(event: ChatMemberUpdated):
+    if event.new_chat_member.status == "member":
+        added_by = event.from_user.id
+        if added_by in ADMIN_IDS:
+            await add_group(event.chat.id)
+            await bot.send_message(added_by, f"✅ Бот добавлен в группу <code>{event.chat.id}</code>. Группа автоматически одобрена.", parse_mode="HTML")
         else:
-            return await msg.reply("❌ Код недействителен или истёк")
-
-    if time.time() > invite["expires_at"]:
-        invite_codes.pop(code, None)
-        await delete_invite(code)
-        return await msg.reply("❌ Код истёк")
-
-    await add_group(msg.chat.id)
-    invite_codes.pop(code, None)
-    await delete_invite(code)
-
-    await msg.react("✅")
-    await msg.reply(
-        "✅ Группа успешно одобрена.\n\n"
-        "Теперь в этой группе работает автоскан QR-кодов. "
-        "Отправьте скриншот с web.max.ru и бот авторизует токен."
-    )
-
-    await bot.send_message(
-        invite["admin_id"],
-        f"✅ Группа <code>{msg.chat.id}</code> одобрена по коду /click {code}",
-        parse_mode="HTML"
-    )
+            await bot.leave_chat(event.chat.id)
 
 @dp.callback_query(lambda c: c.data == "export_alive")
 async def export_alive_cb(callback: CallbackQuery):
