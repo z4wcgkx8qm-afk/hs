@@ -81,8 +81,10 @@ async def get_today_stats():
     today_start_naive = today_start.replace(tzinfo=None)
     
     async with db_pool.acquire() as c:
-        rows = await c.fetch("SELECT username, action FROM stats WHERE created_at >= $1", today_start_naive)
-        return rows
+        rows = await c.fetch("SELECT action FROM stats WHERE created_at >= $1", today_start_naive)
+        success = sum(1 for r in rows if r["action"] == "success")
+        fail = sum(1 for r in rows if r["action"] == "fail")
+        return success, fail
 
 async def export_tokens(alive_only: bool):
     async with db_pool.acquire() as c:
@@ -107,16 +109,7 @@ async def start(msg: Message):
 
 async def show_panel(msg_or_cb):
     alive, dead = await get_counts()
-    rows = await get_today_stats()
-    users = {}
-    for r in rows:
-        u = r["username"] or "неизвестен"
-        if u not in users: users[u] = {"success": 0, "fail": 0}
-        if r["action"] == "success": users[u]["success"] += 1
-        else: users[u]["fail"] += 1
-
-    today_success = sum(d["success"] for d in users.values())
-    today_fail = sum(d["fail"] for d in users.values())
+    today_success, today_fail = await get_today_stats()
 
     text = (
         f"🔐 <b>Faung Scan</b>\n\n"
@@ -126,12 +119,6 @@ async def show_panel(msg_or_cb):
         f"Авторизовано: <code>{today_success}</code>\n"
         f"Ошибок: <code>{today_fail}</code>"
     )
-
-    if users:
-        text += "\n\nПо пользователям:\n"
-        for u, d in users.items():
-            name = u[:15]
-            text += f"• {name}: {d['success']} успешно, {d['fail']} ошибок\n"
 
     if isinstance(msg_or_cb, CallbackQuery):
         await msg_or_cb.message.edit_text(text, reply_markup=main_keyboard(), parse_mode="HTML")
@@ -211,7 +198,7 @@ async def back_to_panel_cb(callback: CallbackQuery):
 async def cancel(msg: Message):
     if msg.from_user.id in ADMIN_IDS and msg.chat.type == "private":
         expecting_tokens.discard(msg.from_user.id)
-        await msg.answer("❌ Загрузка токенов отменена.")
+        await show_panel(msg)
 
 @dp.message()
 async def handler(msg: Message):
@@ -226,10 +213,9 @@ async def handler(msg: Message):
             for t in tokens:
                 await save(t)
                 n += 1
-            expecting_tokens.discard(msg.from_user.id)
             await msg.answer(
                 f"✅ Токены <code>{n}</code> добавлены в базу данных.\n\n"
-                f"<i>Можете начать авторизацию через любую группу</i>",
+                f"<i>Можете отправить ещё или /cancel для выхода</i>",
                 parse_mode="HTML"
             )
         return
