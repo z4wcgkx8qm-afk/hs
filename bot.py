@@ -10,7 +10,7 @@ from io import BytesIO
 from PIL import Image
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pymax import Client, ExtraConfig
 
 logging.basicConfig(level=logging.INFO)
@@ -18,11 +18,13 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
+ADMIN_IDS = {7742243877, 8706712229}
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 db_pool = None
 processing = set()
+expecting_tokens = set()
 
 def read_qr(image: Image.Image) -> str | None:
     try:
@@ -72,7 +74,9 @@ async def get_counts():
     async with db_pool.acquire() as c:
         total = await c.fetchval("SELECT COUNT(*) FROM tokens")
         alive = await c.fetchval("SELECT COUNT(*) FROM tokens WHERE alive=TRUE")
-        return total, alive
+        success = await c.fetchval("SELECT COUNT(*) FROM stats WHERE action='success'")
+        today = await c.fetchval("SELECT COUNT(*) FROM stats WHERE action='success' AND created_at::date=CURRENT_DATE")
+        return total, alive, success or 0, today or 0
 
 async def is_group_approved(gid):
     async with db_pool.acquire() as c:
@@ -84,32 +88,52 @@ async def add_group(gid):
 
 async def get_today_stats():
     async with db_pool.acquire() as c:
-        rows = await c.fetch("SELECT username, action FROM stats WHERE created_at::date = CURRENT_DATE")
-        return rows
+        return await c.fetch("SELECT username, action FROM stats WHERE created_at::date=CURRENT_DATE")
 
 @dp.message(Command("start"))
 async def start(msg: Message):
-    if msg.chat.type == "private":
-        total, alive = await get_counts()
-        success = await db_pool.fetchval("SELECT COUNT(*) FROM stats WHERE action='success'")
-        fail = await db_pool.fetchval("SELECT COUNT(*) FROM stats WHERE action='fail'")
-        await msg.answer(
-            f"📊 Всего токенов: {total}\n"
-            f"🟢 Живых: {alive}\n"
-            f"🔴 Мёртвых: {total - alive}\n\n"
-            f"✅ Авторизовано: {success or 0}\n"
-            f"❌ Ошибок: {fail or 0}\n\n"
-            f"/add — загрузить токены"
-        )
+    if msg.chat.type != "private" or msg.from_user.id not in ADMIN_IDS:
+        return
 
-@dp.message(Command("add"))
-async def add_cmd(msg: Message):
-    if msg.chat.type != "private": return
-    await msg.answer("📥 Отправь токены. Каждый с новой строки.")
+    total, alive, success, today = await get_counts()
+    dead = total - alive
+
+    text = (
+        f"🔐 <b>Faung Scan</b>\n\n"
+        f"В наличии токенов: <code>{total}</code>\n"
+        f"Авторизовано всего: <code>{success}</code>\n"
+        f"Авторизовано за сегодня: <code>{today}</code>\n"
+        f"Мёртвых токенов: <code>{dead}</code>"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Добавить токены", callback_data="add_tokens")]
+    ])
+
+    await msg.answer(text, reply_markup=keyboard, parse_mode="HTML")
+
+@dp.callback_query(lambda c: c.data == "add_tokens")
+async def add_tokens_cb(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("Доступ запрещён", show_alert=True)
+
+    expecting_tokens.add(callback.from_user.id)
+    await callback.message.answer(
+        "🔖 Отправьте мне токены ANDROID в любом формате.\n\n"
+        "<i>Чтобы закончить действие, введите /cancel</i>",
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@dp.message(Command("cancel"))
+async def cancel(msg: Message):
+    if msg.from_user.id in ADMIN_IDS and msg.chat.type == "private":
+        expecting_tokens.discard(msg.from_user.id)
+        await msg.answer("❌ Загрузка токенов отменена.")
 
 @dp.message(Command("setup"))
 async def setup_cmd(msg: Message):
-    if msg.chat.type not in ("group","supergroup"): return
+    if msg.from_user.id not in ADMIN_IDS: return
     try:
         await add_group(int(msg.text.split()[1]))
         await msg.answer("✅ Группа одобрена")
@@ -143,18 +167,27 @@ async def stats_cmd(msg: Message):
 
 @dp.message()
 async def handler(msg: Message):
-    if msg.chat.type == "private" and msg.text:
-        lines = [l.strip() for l in msg.text.split("\n") if l.strip()]
-        tokens = [extract_token(l) for l in lines if extract_token(l)]
-        if not tokens: return
-        n = 0
-        for t in tokens:
-            await save(t)
-            n += 1
-        total, alive = await get_counts()
-        await msg.answer(f"✅ {n} токенов. Всего: {total}, живых: {alive}")
+    # Загрузка токенов админом в ЛС
+    if msg.chat.type == "private" and msg.from_user.id in ADMIN_IDS and msg.from_user.id in expecting_tokens:
+        if msg.text:
+            lines = [l.strip() for l in msg.text.split("\n") if l.strip()]
+            tokens = [extract_token(l) for l in lines if extract_token(l)]
+            if not tokens:
+                await msg.answer("❌ Неверный формат токенов. Отправьте токены, каждый с новой строки")
+                return
+            n = 0
+            for t in tokens:
+                await save(t)
+                n += 1
+            expecting_tokens.discard(msg.from_user.id)
+            await msg.answer(
+                f"✅ Токены <code>{n}</code> добавлены в базу данных.\n\n"
+                f"<i>Можете начать авторизацию через одобренную группу</i>",
+                parse_mode="HTML"
+            )
         return
 
+    # QR в группах
     if msg.chat.type in ("group", "supergroup") and msg.photo:
         if msg.message_id in processing: return
         processing.add(msg.message_id)
@@ -169,19 +202,19 @@ async def handler(msg: Message):
 
             if not qr_data:
                 await log_stat(msg.from_user.id, msg.from_user.username or msg.from_user.full_name, "fail")
-                await msg.reply("Не удалось распознать QR-код.")
+                await msg.reply("❌ QR-код не распознан. Убедитесь, что изображение чёткое и содержит QR с web.max.ru")
                 return
 
             if "max.ru" not in qr_data and "oneme.ru" not in qr_data:
                 await log_stat(msg.from_user.id, msg.from_user.username or msg.from_user.full_name, "fail")
-                await msg.reply("Это не QR-код от MAX.")
+                await msg.reply("❌ Это не QR-код от MAX. Отправьте скриншот с web.max.ru")
                 return
 
             tried = 0
             while True:
                 t = await get_token()
                 if not t:
-                    await msg.reply("Нет доступных токенов.")
+                    await msg.reply("❌ Нет доступных токенов. Загрузите токены через /add в личные сообщения")
                     return
 
                 tried += 1
@@ -201,14 +234,14 @@ async def handler(msg: Message):
 
                     phone = c.me.contact.phone if c.me and c.me.contact else "неизвестен"
                     await log_stat(msg.from_user.id, msg.from_user.username or msg.from_user.full_name, "success")
-                    await msg.reply(f"Номер {phone} успешно авторизован.")
+                    await msg.reply(f"✅ Номер {phone} успешно авторизован. Токен обработан.")
                     return
 
                 except Exception as e:
                     err = str(e).lower()
                     if "expired" in err:
                         await log_stat(msg.from_user.id, msg.from_user.username or msg.from_user.full_name, "fail")
-                        await msg.reply("QR-код устарел.")
+                        await msg.reply("❌ QR-код устарел. Сделайте новый скриншот и попробуйте снова")
                         return
                     elif "blocked" in err or "recovery" in err:
                         await kill(t['id'])
@@ -220,7 +253,7 @@ async def handler(msg: Message):
                         continue
 
         except Exception:
-            await msg.reply("Ошибка обработки.")
+            await msg.reply("❌ Произошла ошибка. Попробуйте позже")
         finally:
             processing.discard(msg.message_id)
 
