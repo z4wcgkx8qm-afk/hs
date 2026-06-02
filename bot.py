@@ -28,26 +28,47 @@ def read_qr(image: Image.Image) -> str | None:
         img = np.array(image.convert('RGB'))
         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         detector = cv2.QRCodeDetector()
+        
+        # СВЕТЛАЯ ТЕМА
         data, _, _ = detector.detectAndDecode(img)
         if data: return data
-        inv = cv2.bitwise_not(img)
-        data, _, _ = detector.detectAndDecode(inv)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        data, _, _ = detector.detectAndDecode(otsu)
         if data: return data
-        gray = cv2.cvtColor(inv, cv2.COLOR_BGR2GRAY)
         adp = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
         data, _, _ = detector.detectAndDecode(adp)
         if data: return data
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        _, enhanced = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        data, _, _ = detector.detectAndDecode(enhanced)
-        if data: return data
         h, w = img.shape[:2]
-        scaled = cv2.resize(img, (w*2, h*2), interpolation=cv2.INTER_CUBIC)
-        data, _, _ = detector.detectAndDecode(scaled)
+        scaled2 = cv2.resize(img, (w*2, h*2), interpolation=cv2.INTER_CUBIC)
+        data, _, _ = detector.detectAndDecode(scaled2)
         if data: return data
         scaled3 = cv2.resize(img, (w*3, h*3), interpolation=cv2.INTER_CUBIC)
         data, _, _ = detector.detectAndDecode(scaled3)
         if data: return data
+        
+        # ТЁМНАЯ ТЕМА
+        inv = cv2.bitwise_not(img)
+        data, _, _ = detector.detectAndDecode(inv)
+        if data: return data
+        gray_inv = cv2.cvtColor(inv, cv2.COLOR_BGR2GRAY)
+        _, otsu_inv = cv2.threshold(gray_inv, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        data, _, _ = detector.detectAndDecode(otsu_inv)
+        if data: return data
+        adp_inv = cv2.adaptiveThreshold(gray_inv, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+        data, _, _ = detector.detectAndDecode(adp_inv)
+        if data: return data
+        scaled_inv = cv2.resize(inv, (w*2, h*2), interpolation=cv2.INTER_CUBIC)
+        data, _, _ = detector.detectAndDecode(scaled_inv)
+        if data: return data
+        
+        # УНИВЕРСАЛЬНАЯ
+        blurred = cv2.GaussianBlur(gray, (0,0), 3)
+        sharp = cv2.addWeighted(gray, 1.5, blurred, -0.5, 0)
+        _, binary = cv2.threshold(sharp, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        data, _, _ = detector.detectAndDecode(binary)
+        if data: return data
+        
         return None
     except:
         return None
