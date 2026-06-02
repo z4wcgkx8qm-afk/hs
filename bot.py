@@ -41,8 +41,17 @@ async def init_db():
     global db_pool
     db_pool = await asyncpg.create_pool(DATABASE_URL)
     async with db_pool.acquire() as c:
+        await c.execute("CREATE TABLE IF NOT EXISTS approved_groups (group_id BIGINT PRIMARY KEY)")
         await c.execute("CREATE TABLE IF NOT EXISTS tokens (id SERIAL PRIMARY KEY, phone TEXT, token TEXT, alive BOOLEAN DEFAULT TRUE)")
         await c.execute("CREATE TABLE IF NOT EXISTS stats (id SERIAL PRIMARY KEY, user_id BIGINT, username TEXT, action TEXT, created_at TIMESTAMP DEFAULT NOW())")
+
+async def is_group_approved(gid):
+    async with db_pool.acquire() as c:
+        return await c.fetchval("SELECT 1 FROM approved_groups WHERE group_id=$1", gid)
+
+async def add_group(gid):
+    async with db_pool.acquire() as c:
+        await c.execute("INSERT INTO approved_groups VALUES($1) ON CONFLICT DO NOTHING", gid)
 
 async def get_token():
     async with db_pool.acquire() as c:
@@ -88,9 +97,10 @@ async def export_tokens(alive_only: bool):
 
 def main_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Добавить токены", callback_data="add_tokens")],
-        [InlineKeyboardButton(text="Очистить мёртвые сессии", callback_data="clear_dead")],
-        [InlineKeyboardButton(text="Выгрузить сессии", callback_data="export_sessions")]
+        [InlineKeyboardButton(text="Добавить токены", callback_data="add_tokens"),
+         InlineKeyboardButton(text="Очистить мёртвые", callback_data="clear_dead")],
+        [InlineKeyboardButton(text="Выгрузить сессии", callback_data="export_sessions"),
+         InlineKeyboardButton(text="Одобрить группу", callback_data="add_group_btn")]
     ])
 
 @dp.message(Command("start"))
@@ -119,7 +129,6 @@ async def show_panel(msg_or_cb):
 async def add_tokens_cb(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         return await callback.answer("Доступ запрещён", show_alert=True)
-
     expecting_tokens.add(callback.from_user.id)
     await callback.message.answer(
         "🔖 Отправьте мне токены ANDROID в любом формате.\n\n"
@@ -132,19 +141,14 @@ async def add_tokens_cb(callback: CallbackQuery):
 async def clear_dead_cb(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         return await callback.answer("Доступ запрещён", show_alert=True)
-
     count = await clear_dead()
-    if count == 0:
-        await callback.answer("Нет мёртвых сессий", show_alert=True)
-    else:
-        await callback.answer(f"Очищено {count} мёртвых сессий", show_alert=True)
+    await callback.answer("Нет мёртвых сессий" if count == 0 else f"Очищено {count} мёртвых сессий", show_alert=True)
     await show_panel(callback)
 
 @dp.callback_query(lambda c: c.data == "export_sessions")
 async def export_sessions_cb(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         return await callback.answer("Доступ запрещён", show_alert=True)
-
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Выгрузить живые", callback_data="export_alive"),
          InlineKeyboardButton(text="Выгрузить мёртвые", callback_data="export_dead")],
@@ -153,15 +157,25 @@ async def export_sessions_cb(callback: CallbackQuery):
     await callback.message.edit_text("Выберите тип выгрузки:", reply_markup=keyboard)
     await callback.answer()
 
+@dp.callback_query(lambda c: c.data == "add_group_btn")
+async def add_group_btn_cb(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("Доступ запрещён", show_alert=True)
+    bot_username = (await bot.get_me()).username
+    url = f"https://t.me/{bot_username}?startgroup=admin"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Добавить бота в группу", url=url)]
+    ])
+    await callback.message.answer("Нажмите кнопку, выберите группу и дайте права администратора.", reply_markup=keyboard)
+    await callback.answer()
+
 @dp.callback_query(lambda c: c.data == "export_alive")
 async def export_alive_cb(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         return await callback.answer("Доступ запрещён", show_alert=True)
-
     tokens = await export_tokens(alive_only=True)
     if not tokens:
         return await callback.answer("Нет живых токенов", show_alert=True)
-
     file = BufferedInputFile("\n".join(tokens).encode(), filename="alive_tokens.txt")
     await callback.message.answer_document(file, caption=f"Живых токенов: {len(tokens)}")
     await callback.answer()
@@ -170,11 +184,9 @@ async def export_alive_cb(callback: CallbackQuery):
 async def export_dead_cb(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         return await callback.answer("Доступ запрещён", show_alert=True)
-
     tokens = await export_tokens(alive_only=False)
     if not tokens:
         return await callback.answer("Нет мёртвых токенов", show_alert=True)
-
     file = BufferedInputFile("\n".join(tokens).encode(), filename="dead_tokens.txt")
     await callback.message.answer_document(file, caption=f"Мёртвых токенов: {len(tokens)}")
     await callback.answer()
