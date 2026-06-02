@@ -84,8 +84,7 @@ async def get_counts():
 async def get_all_stats():
     async with db_pool.acquire() as c:
         success = await c.fetchval("SELECT COUNT(*) FROM stats WHERE action='success'")
-        fail = await c.fetchval("SELECT COUNT(*) FROM stats WHERE action='fail'")
-        return success or 0, fail or 0
+        return success or 0
 
 async def export_tokens(alive_only: bool):
     async with db_pool.acquire() as c:
@@ -111,13 +110,12 @@ async def start(msg: Message):
 
 async def show_panel(msg_or_cb):
     alive, dead = await get_counts()
-    success, fail = await get_all_stats()
+    success = await get_all_stats()
 
     text = (
         f"В наличии токенов: <code>{alive}</code>\n"
         f"Мёртвых токенов: <code>{dead}</code>\n"
-        f"Авторизовано: <code>{success}</code>\n"
-        f"Ошибок: <code>{fail}</code>"
+        f"Авторизовано: <code>{success}</code>"
     )
 
     if isinstance(msg_or_cb, CallbackQuery):
