@@ -5,6 +5,7 @@ import logging
 import re
 import numpy as np
 import cv2
+import requests
 from io import BytesIO
 from PIL import Image
 from aiogram import Bot, Dispatcher, F
@@ -30,37 +31,55 @@ def read_qr(image: Image.Image) -> str | None:
         img = np.array(image.convert('RGB'))
         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         detector = cv2.QRCodeDetector()
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        avg_brightness = np.mean(gray)
         
-        if avg_brightness < 128:
-            inv = cv2.bitwise_not(img)
-            data, _, _ = detector.detectAndDecode(inv)
-            if data: return data
-            gray_inv = cv2.cvtColor(inv, cv2.COLOR_BGR2GRAY)
-            _, otsu = cv2.threshold(gray_inv, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            data, _, _ = detector.detectAndDecode(otsu)
-            if data: return data
-            kernel = np.ones((3,3), np.uint8)
-            eroded = cv2.erode(inv, kernel, iterations=1)
-            data, _, _ = detector.detectAndDecode(eroded)
-            if data: return data
-            dilated = cv2.dilate(inv, kernel, iterations=1)
-            data, _, _ = detector.detectAndDecode(dilated)
-            if data: return data
-        else:
-            data, _, _ = detector.detectAndDecode(img)
-            if data: return data
-            _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            data, _, _ = detector.detectAndDecode(otsu)
-            if data: return data
-            adp = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
-            data, _, _ = detector.detectAndDecode(adp)
-            if data: return data
-            h, w = img.shape[:2]
-            scaled = cv2.resize(img, (w*2, h*2), interpolation=cv2.INTER_CUBIC)
-            data, _, _ = detector.detectAndDecode(scaled)
-            if data: return data
+        # СВЕТЛАЯ ТЕМА
+        data, _, _ = detector.detectAndDecode(img)
+        if data: return data
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        data, _, _ = detector.detectAndDecode(otsu)
+        if data: return data
+        adp = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+        data, _, _ = detector.detectAndDecode(adp)
+        if data: return data
+        h, w = img.shape[:2]
+        scaled2 = cv2.resize(img, (w*2, h*2), interpolation=cv2.INTER_CUBIC)
+        data, _, _ = detector.detectAndDecode(scaled2)
+        if data: return data
+        scaled3 = cv2.resize(img, (w*3, h*3), interpolation=cv2.INTER_CUBIC)
+        data, _, _ = detector.detectAndDecode(scaled3)
+        if data: return data
+        
+        # ТЁМНАЯ ТЕМА
+        inv = cv2.bitwise_not(img)
+        data, _, _ = detector.detectAndDecode(inv)
+        if data: return data
+        gray_inv = cv2.cvtColor(inv, cv2.COLOR_BGR2GRAY)
+        _, otsu_inv = cv2.threshold(gray_inv, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        data, _, _ = detector.detectAndDecode(otsu_inv)
+        if data: return data
+        kernel = np.ones((3,3), np.uint8)
+        eroded = cv2.erode(inv, kernel, iterations=1)
+        data, _, _ = detector.detectAndDecode(eroded)
+        if data: return data
+        dilated = cv2.dilate(inv, kernel, iterations=1)
+        data, _, _ = detector.detectAndDecode(dilated)
+        if data: return data
+        
+        # ВНЕШНИЙ API
+        try:
+            buf = BytesIO()
+            image.save(buf, format='PNG')
+            buf.seek(0)
+            files = {'file': ('qr.png', buf, 'image/png')}
+            r = requests.post('https://api.qrserver.com/v1/read-qr-code/', files=files, timeout=10)
+            if r.status_code == 200:
+                result = r.json()
+                if result and result[0]['symbol'][0]['data']:
+                    return result[0]['symbol'][0]['data']
+        except Exception:
+            pass
+        
         return None
     except:
         return None
