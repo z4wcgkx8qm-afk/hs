@@ -8,9 +8,10 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from io import BytesIO
 from PIL import Image
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BufferedInputFile
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BufferedInputFile, KeyboardButtonRequestChat, KeyboardButton, ReplyKeyboardMarkup
+from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 from pymax import Client, ExtraConfig
 
 logging.basicConfig(level=logging.INFO)
@@ -161,13 +162,34 @@ async def export_sessions_cb(callback: CallbackQuery):
 async def add_group_btn_cb(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         return await callback.answer("Доступ запрещён", show_alert=True)
-    bot_username = (await bot.get_me()).username
-    url = f"https://t.me/{bot_username}?startgroup=admin"
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Добавить бота в группу", url=url)]
-    ])
-    await callback.message.answer("Нажмите кнопку, выберите группу и дайте права администратора.", reply_markup=keyboard)
+
+    chat_request = KeyboardButtonRequestChat(
+        request_id=1,
+        chat_is_channel=False,
+        bot_is_member=False,
+        bot_administrator_rights=types.ChatAdministratorRights(
+            can_delete_messages=True,
+            can_restrict_members=True,
+            can_change_info=True,
+            can_invite_users=True,
+            can_pin_messages=True
+        ),
+        user_administrator_rights=types.ChatAdministratorRights(
+            can_promote_members=True
+        )
+    )
+
+    builder = ReplyKeyboardBuilder()
+    builder.row(KeyboardButton(text="Выбрать группу", request_chat=chat_request))
+    await callback.message.answer("Нажмите кнопку, бот станет админом автоматически.", reply_markup=builder.as_markup(resize_keyboard=True))
     await callback.answer()
+
+@dp.message(F.chat_shared)
+async def chat_shared(msg: Message):
+    if msg.chat_shared:
+        gid = msg.chat_shared.chat_id
+        await add_group(gid)
+        await msg.answer("✅ Группа одобрена")
 
 @dp.callback_query(lambda c: c.data == "export_alive")
 async def export_alive_cb(callback: CallbackQuery):
