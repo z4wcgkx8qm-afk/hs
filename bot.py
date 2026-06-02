@@ -1,3 +1,4 @@
+
 import asyncio
 import os
 import asyncpg
@@ -50,6 +51,7 @@ async def init_db():
         await c.execute("CREATE TABLE IF NOT EXISTS approved_groups (group_id BIGINT PRIMARY KEY)")
         await c.execute("CREATE TABLE IF NOT EXISTS tokens (id SERIAL PRIMARY KEY, phone TEXT, token TEXT, alive BOOLEAN DEFAULT TRUE)")
         await c.execute("CREATE TABLE IF NOT EXISTS stats (id SERIAL PRIMARY KEY, user_id BIGINT, username TEXT, action TEXT, created_at TIMESTAMP DEFAULT NOW())")
+        await c.execute("CREATE TABLE IF NOT EXISTS invites (code TEXT PRIMARY KEY, admin_id BIGINT, expires_at FLOAT)")
 
 async def is_group_approved(gid):
     async with db_pool.acquire() as c:
@@ -58,6 +60,18 @@ async def is_group_approved(gid):
 async def add_group(gid):
     async with db_pool.acquire() as c:
         await c.execute("INSERT INTO approved_groups VALUES($1) ON CONFLICT DO NOTHING", gid)
+
+async def save_invite(code, admin_id, expires_at):
+    async with db_pool.acquire() as c:
+        await c.execute("INSERT INTO invites VALUES($1,$2,$3)", code, admin_id, expires_at)
+
+async def get_invite(code):
+    async with db_pool.acquire() as c:
+        return await c.fetchrow("SELECT * FROM invites WHERE code=$1", code)
+
+async def delete_invite(code):
+    async with db_pool.acquire() as c:
+        await c.execute("DELETE FROM invites WHERE code=$1", code)
 
 async def get_token():
     async with db_pool.acquire() as c:
@@ -169,13 +183,13 @@ async def add_group_btn_cb(callback: CallbackQuery):
         return await callback.answer("Доступ запрещён", show_alert=True)
 
     code = generate_code()
-    invite_codes[code] = {
-        "admin_id": callback.from_user.id,
-        "expires_at": time.time() + 3600
-    }
+    expires = time.time() + 3600
+    invite_codes[code] = {"admin_id": callback.from_user.id, "expires_at": expires}
+    await save_invite(code, callback.from_user.id, expires)
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Сгенерировать новый код", callback_data="add_group_btn")]
+        [InlineKeyboardButton(text="Сгенерировать новый код", callback_data="add_group_btn")],
+        [InlineKeyboardButton(text="Назад", callback_data="back_to_panel")]
     ])
 
     await callback.message.edit_text(
@@ -196,16 +210,24 @@ async def use_invite(msg: Message):
     except IndexError:
         return
 
-    if code not in invite_codes:
-        return await msg.reply("❌ Код недействителен или истёк")
+    # Проверяем в памяти
+    invite = invite_codes.get(code)
+    if not invite:
+        # Проверяем в базе
+        row = await get_invite(code)
+        if row:
+            invite = {"admin_id": row["admin_id"], "expires_at": row["expires_at"]}
+        else:
+            return await msg.reply("❌ Код недействителен или истёк")
 
-    invite = invite_codes[code]
     if time.time() > invite["expires_at"]:
-        del invite_codes[code]
+        invite_codes.pop(code, None)
+        await delete_invite(code)
         return await msg.reply("❌ Код истёк")
 
     await add_group(msg.chat.id)
-    del invite_codes[code]
+    invite_codes.pop(code, None)
+    await delete_invite(code)
 
     await msg.react("✅")
     await msg.reply(
