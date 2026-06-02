@@ -10,7 +10,7 @@ from PIL import Image
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message
-from pymax import Client, ExtraConfig
+from pymax import WebClient, ExtraConfig
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,8 +28,6 @@ def read_qr(image: Image.Image) -> str | None:
         img = np.array(image.convert('RGB'))
         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         detector = cv2.QRCodeDetector()
-        
-        # СВЕТЛАЯ ТЕМА
         data, _, _ = detector.detectAndDecode(img)
         if data: return data
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -46,8 +44,6 @@ def read_qr(image: Image.Image) -> str | None:
         scaled3 = cv2.resize(img, (w*3, h*3), interpolation=cv2.INTER_CUBIC)
         data, _, _ = detector.detectAndDecode(scaled3)
         if data: return data
-        
-        # ТЁМНАЯ ТЕМА
         inv = cv2.bitwise_not(img)
         data, _, _ = detector.detectAndDecode(inv)
         if data: return data
@@ -61,14 +57,11 @@ def read_qr(image: Image.Image) -> str | None:
         scaled_inv = cv2.resize(inv, (w*2, h*2), interpolation=cv2.INTER_CUBIC)
         data, _, _ = detector.detectAndDecode(scaled_inv)
         if data: return data
-        
-        # УНИВЕРСАЛЬНАЯ
         blurred = cv2.GaussianBlur(gray, (0,0), 3)
         sharp = cv2.addWeighted(gray, 1.5, blurred, -0.5, 0)
         _, binary = cv2.threshold(sharp, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         data, _, _ = detector.detectAndDecode(binary)
         if data: return data
-        
         return None
     except:
         return None
@@ -123,7 +116,7 @@ async def qr(msg: Message):
                 await msg.reply("❌ Нет токенов"); return
             tried += 1
             try:
-                c = Client(phone="+79990000000", work_dir="cache", session_name=f"qr_{t['id']}.db", extra_config=ExtraConfig(token=t['token']))
+                c = WebClient(work_dir="cache", session_name=f"qr_{t['id']}.db", extra_config=ExtraConfig(token=t['token']))
                 task = asyncio.create_task(c.start())
                 for _ in range(6):
                     if c.me and c.me.contact: break
