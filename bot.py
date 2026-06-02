@@ -28,42 +28,65 @@ def read_qr(image: Image.Image) -> str | None:
         img = np.array(image.convert('RGB'))
         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         detector = cv2.QRCodeDetector()
+        
         data, _, _ = detector.detectAndDecode(img)
+        logger.info(f"Попытка 1 (оригинал): {bool(data)}")
         if data: return data
+        
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         data, _, _ = detector.detectAndDecode(otsu)
+        logger.info(f"Попытка 2 (OTSU): {bool(data)}")
         if data: return data
+        
         adp = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
         data, _, _ = detector.detectAndDecode(adp)
+        logger.info(f"Попытка 3 (адаптивная): {bool(data)}")
         if data: return data
+        
         h, w = img.shape[:2]
         scaled2 = cv2.resize(img, (w*2, h*2), interpolation=cv2.INTER_CUBIC)
         data, _, _ = detector.detectAndDecode(scaled2)
+        logger.info(f"Попытка 4 (x2): {bool(data)}")
         if data: return data
+        
         scaled3 = cv2.resize(img, (w*3, h*3), interpolation=cv2.INTER_CUBIC)
         data, _, _ = detector.detectAndDecode(scaled3)
+        logger.info(f"Попытка 5 (x3): {bool(data)}")
         if data: return data
+        
         inv = cv2.bitwise_not(img)
         data, _, _ = detector.detectAndDecode(inv)
+        logger.info(f"Попытка 6 (инверсия): {bool(data)}")
         if data: return data
+        
         gray_inv = cv2.cvtColor(inv, cv2.COLOR_BGR2GRAY)
         _, otsu_inv = cv2.threshold(gray_inv, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         data, _, _ = detector.detectAndDecode(otsu_inv)
+        logger.info(f"Попытка 7 (инверсия+OTSU): {bool(data)}")
         if data: return data
+        
         adp_inv = cv2.adaptiveThreshold(gray_inv, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
         data, _, _ = detector.detectAndDecode(adp_inv)
+        logger.info(f"Попытка 8 (инверсия+адаптивная): {bool(data)}")
         if data: return data
+        
         scaled_inv = cv2.resize(inv, (w*2, h*2), interpolation=cv2.INTER_CUBIC)
         data, _, _ = detector.detectAndDecode(scaled_inv)
+        logger.info(f"Попытка 9 (инверсия x2): {bool(data)}")
         if data: return data
+        
         blurred = cv2.GaussianBlur(gray, (0,0), 3)
         sharp = cv2.addWeighted(gray, 1.5, blurred, -0.5, 0)
         _, binary = cv2.threshold(sharp, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         data, _, _ = detector.detectAndDecode(binary)
+        logger.info(f"Попытка 10 (резкость): {bool(data)}")
         if data: return data
+        
+        logger.info("Все 10 попыток не распознали QR")
         return None
-    except:
+    except Exception as e:
+        logger.error(f"Ошибка read_qr: {e}")
         return None
 
 def extract_token(text: str) -> str | None:
@@ -94,27 +117,40 @@ async def start(msg: Message):
     if msg.chat.type == "private":
         await msg.answer("📥 Отправь токены (каждый с новой строки) для загрузки.\n\nОтправь QR в любой группе — автоскан.")
 
-@dp.message(F.photo)
+@dp.message()
 async def qr(msg: Message):
     if msg.chat.type not in ("group","supergroup"): return
+    if not msg.photo:
+        logger.info(f"Не фото: {msg.content_type}")
+        return
     if msg.message_id in processing: return
     processing.add(msg.message_id)
+    logger.info(f"Фото получено, начинаю обработку")
     try:
         photo = msg.photo[-1]
         buf = BytesIO()
         await bot.download(photo, destination=buf)
         buf.seek(0)
+        logger.info(f"Фото скачано, размер: {buf.getbuffer().nbytes} байт")
         img = Image.open(buf)
+        logger.info(f"Изображение открыто: {img.size}, {img.mode}")
         qr = read_qr(img)
-        if not qr or ("max.ru" not in qr and "oneme.ru" not in qr):
-            await msg.reply("❌ QR не распознан" if not qr else "❌ Не MAX")
+        if not qr:
+            logger.info("QR не распознан")
+            await msg.reply("❌ QR не распознан")
             return
+        logger.info(f"QR распознан: {qr[:80]}...")
+        if "max.ru" not in qr and "oneme.ru" not in qr:
+            await msg.reply("❌ Не MAX")
+            return
+        
         tried = 0
         while True:
             t = await get_token()
             if not t:
                 await msg.reply("❌ Нет токенов"); return
             tried += 1
+            logger.info(f"Попытка #{tried}, токен #{t['id']}")
             try:
                 c = WebClient(work_dir="cache", session_name=f"qr_{t['id']}.db", extra_config=ExtraConfig(token=t['token']))
                 task = asyncio.create_task(c.start())
@@ -129,6 +165,7 @@ async def qr(msg: Message):
                 return
             except Exception as e:
                 err = str(e).lower()
+                logger.error(f"Ошибка: {err[:100]}")
                 if "expired" in err:
                     await msg.reply("❌ QR истек"); return
                 elif "blocked" in err or "recovery" in err:
@@ -137,10 +174,12 @@ async def qr(msg: Message):
                     continue
                 else:
                     await kill(t['id']); continue
-    except:
+    except Exception as e:
+        logger.error(f"Критическая ошибка: {e}")
         await msg.reply("❌ Ошибка")
     finally:
         processing.discard(msg.message_id)
+        logger.info("Обработка завершена")
 
 @dp.message()
 async def text(msg: Message):
